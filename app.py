@@ -340,11 +340,18 @@ def render_quick_expense_form():
             else:
                 sub_tag_list = []
 
+            # 子類選擇 - key 要包含科目 ID，這樣切換科目時會重新渲染
             if sub_tag_list:
-                selected_sub_tag = st.selectbox("子類", [""] + sub_tag_list)
+                selected_sub_tag = st.selectbox(
+                    "子類",
+                    ["（不選擇）"] + sub_tag_list,
+                    key=f"sub_tag_{selected_cat_id}"
+                )
+                if selected_sub_tag == "（不選擇）":
+                    selected_sub_tag = ""
             else:
-                selected_sub_tag = ""
                 st.text("無子類")
+                selected_sub_tag = ""
 
         amount = st.number_input("金額", min_value=0, step=10, value=0)
         note = st.text_input("備註（選填）")
