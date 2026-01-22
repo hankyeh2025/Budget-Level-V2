@@ -477,18 +477,40 @@ def render_period_transactions():
         st.info("本期尚無消費紀錄")
         return
 
+    # 載入 Category 和 Sub_Tag 資料來取得名稱
+    categories = load_categories()
+    sub_tags = load_sub_tags()
+
+    # JOIN Category 表取得科目名稱
+    if not categories.empty and "Category_ID" in categories.columns:
+        cat_mapping = categories[["Category_ID", "Name"]].copy()
+        cat_mapping.columns = ["Category_ID", "Category_Name"]
+        expenses = expenses.merge(cat_mapping, on="Category_ID", how="left")
+        expenses["Category_Name"] = expenses["Category_Name"].fillna("")
+    else:
+        expenses["Category_Name"] = ""
+
+    # JOIN Sub_Tag 表取得子類名稱
+    if not sub_tags.empty and "Sub_Tag_ID" in sub_tags.columns:
+        tag_mapping = sub_tags[["Sub_Tag_ID", "Name"]].copy()
+        tag_mapping.columns = ["Sub_Tag_ID", "Sub_Tag_Name"]
+        expenses = expenses.merge(tag_mapping, on="Sub_Tag_ID", how="left")
+        expenses["Sub_Tag_Name"] = expenses["Sub_Tag_Name"].fillna("—")
+    else:
+        expenses["Sub_Tag_Name"] = "—"
+
     # 格式化顯示
     expenses = expenses.sort_values("Date", ascending=False)
 
     # 選擇要顯示的欄位
-    display_cols = ["Date", "Category", "Sub_Tag", "Amount", "Note"]
+    display_cols = ["Date", "Category_Name", "Sub_Tag_Name", "Item", "Amount", "Note"]
     display_df = expenses[[c for c in display_cols if c in expenses.columns]].copy()
 
     if "Date" in display_df.columns:
         display_df["Date"] = display_df["Date"].dt.strftime("%m/%d")
 
     # 重新命名欄位
-    display_df.columns = ["日期", "科目", "子類", "金額", "備註"][:len(display_df.columns)]
+    display_df.columns = ["日期", "科目", "子類", "品項", "金額", "備註"][:len(display_df.columns)]
 
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
