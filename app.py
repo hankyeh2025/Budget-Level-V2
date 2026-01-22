@@ -9,7 +9,6 @@ from google.oauth2.service_account import Credentials
 import pandas as pd
 from datetime import datetime, date
 from typing import Optional
-import uuid
 
 # =============================================================================
 # 常數定義
@@ -177,11 +176,13 @@ def add_transaction(
     trans_type: str,
     amount: float,
     account: str,
-    category: str = "",
-    sub_tag: str = "",
+    category_id: str = "",
+    sub_tag_id: str = "",
+    item: str = "",
     note: str = "",
+    goal_id: str = "",
     target_account: str = "",
-    saving_goal_id: str = ""
+    ref: str = ""
 ) -> bool:
     """新增交易記錄"""
     spreadsheet = get_spreadsheet()
@@ -192,26 +193,27 @@ def add_transaction(
         worksheet = spreadsheet.worksheet(SHEET_TRANSACTION)
 
         # 產生交易 ID
-        trans_id = str(uuid.uuid4())[:8]
+        trans_id = f"TXN{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-        # 建立交易資料
+        # 建立交易資料 - 對齊 Sheet 欄位順序
+        # Txn_ID | Timestamp | Date | Type | Amount | Account | Category_ID | Sub_Tag_ID | Goal_ID | Target_Account | Item | Note | Ref
         row = [
-            trans_id,                              # ID
-            datetime.now().strftime("%Y-%m-%d"),   # Date
-            datetime.now().strftime("%H:%M:%S"),   # Time
-            trans_type,                            # Type
-            amount,                                # Amount
-            account,                               # Account
-            category,                              # Category
-            sub_tag,                               # Sub_Tag
-            note,                                  # Note
-            target_account,                        # Target_Account (for Transfer)
-            saving_goal_id                         # Saving_Goal_ID
+            trans_id,                                      # Txn_ID
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Timestamp (完整時間)
+            datetime.now().strftime("%Y-%m-%d"),           # Date (只有日期)
+            trans_type,                                    # Type
+            amount,                                        # Amount
+            account,                                       # Account
+            category_id,                                   # Category_ID
+            sub_tag_id,                                    # Sub_Tag_ID
+            goal_id,                                       # Goal_ID
+            target_account,                                # Target_Account
+            item,                                          # Item
+            note,                                          # Note
+            ref                                            # Ref
         ]
 
         worksheet.append_row(row, value_input_option="USER_ENTERED")
-
-        # 清除快取並重新載入
         st.cache_data.clear()
         return True
 
@@ -282,17 +284,17 @@ def get_living_expenses_by_category() -> pd.DataFrame:
     df = get_period_transactions()
 
     if df.empty:
-        return pd.DataFrame(columns=["Category", "Spent"])
+        return pd.DataFrame(columns=["Category_ID", "Spent"])
 
     # 只計算 Expense 類型
     expenses = df[df["Type"] == TYPE_EXPENSE]
 
     if expenses.empty:
-        return pd.DataFrame(columns=["Category", "Spent"])
+        return pd.DataFrame(columns=["Category_ID", "Spent"])
 
-    # 按科目分組統計
-    result = expenses.groupby("Category")["Amount"].sum().reset_index()
-    result.columns = ["Category", "Spent"]
+    # 按 Category_ID 分組統計（不是 Category）
+    result = expenses.groupby("Category_ID")["Amount"].sum().reset_index()
+    result.columns = ["Category_ID", "Spent"]
 
     return result
 
@@ -356,6 +358,7 @@ def render_quick_expense_form():
 
     # ========== 金額、備註、按鈕放在 form 內 ==========
     with st.form("expense_form", clear_on_submit=True):
+        item = st.text_input("品項 *")
         amount = st.number_input("金額", min_value=0, step=10, value=0)
         note = st.text_input("備註（選填）")
 
@@ -364,13 +367,23 @@ def render_quick_expense_form():
         if submitted:
             if amount <= 0:
                 st.error("請輸入有效金額")
+            elif not item:
+                st.error("請輸入品項")
             else:
+                # 取得 Sub_Tag_ID（如果有選子類）
+                if selected_sub_tag:
+                    sub_tag_row = sub_tags[sub_tags["Name"] == selected_sub_tag]
+                    sub_tag_id = sub_tag_row.iloc[0]["Sub_Tag_ID"] if not sub_tag_row.empty else ""
+                else:
+                    sub_tag_id = ""
+
                 success = add_transaction(
                     trans_type=TYPE_EXPENSE,
                     amount=amount,
                     account=ACCOUNT_LIVING,
-                    category=selected_category,
-                    sub_tag=selected_sub_tag,
+                    category_id=selected_cat_id,
+                    sub_tag_id=sub_tag_id,
+                    item=item,
                     note=note
                 )
                 if success:
@@ -464,15 +477,16 @@ def render_category_progress():
     st.subheader("科目進度")
 
     for _, cat in categories.iterrows():
+        cat_id = cat["Category_ID"]
         cat_name = cat["Name"]
         budget = float(cat.get("Budget", 0))
 
         if budget <= 0:
             continue
 
-        # 取得該科目已花費
+        # 用 Category_ID 比對
         if not expenses_by_cat.empty:
-            spent_row = expenses_by_cat[expenses_by_cat["Category"] == cat_name]
+            spent_row = expenses_by_cat[expenses_by_cat["Category_ID"] == cat_id]
             spent = float(spent_row["Spent"].values[0]) if not spent_row.empty else 0
         else:
             spent = 0
