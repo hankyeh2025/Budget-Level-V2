@@ -610,11 +610,13 @@ def render_category_progress():
         remaining = budget - spent
         progress = min(spent / budget, 1.0) if budget > 0 else 0
 
+        warning = " ⚠️" if progress > 0.9 else ""
+
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.progress(progress, text=f"{cat_name}")
+            st.progress(progress, text=f"{cat_name}{warning}")
         with col2:
-            st.write(f"${remaining:,.0f}")
+            st.write(f"${spent:,.0f} / ${budget:,.0f}")
 
 
 # =============================================================================
