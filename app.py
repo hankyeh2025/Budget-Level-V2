@@ -326,9 +326,16 @@ def render_quick_expense_form():
             selected_category = st.selectbox("科目", category_list)
 
         with col2:
-            # 過濾該科目的子類
-            if not sub_tags.empty and "Category" in sub_tags.columns:
-                category_sub_tags = sub_tags[sub_tags["Category"] == selected_category]
+            # 先取得選中科目的 Category_ID
+            selected_cat_row = categories[categories["Name"] == selected_category]
+            if not selected_cat_row.empty:
+                selected_cat_id = selected_cat_row.iloc[0]["Category_ID"]
+            else:
+                selected_cat_id = None
+
+            # 用 Category_ID 過濾子類
+            if not sub_tags.empty and "Category_ID" in sub_tags.columns and selected_cat_id:
+                category_sub_tags = sub_tags[sub_tags["Category_ID"] == selected_cat_id]
                 sub_tag_list = category_sub_tags["Name"].tolist() if "Name" in category_sub_tags.columns else []
             else:
                 sub_tag_list = []
