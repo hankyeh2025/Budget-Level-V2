@@ -543,11 +543,21 @@ def render_status_overview():
     backup_balance = get_backup_balance()
     free_fund_balance = get_free_fund_balance()
 
+    # 取得 Back Up 上限
+    config = load_config()
+    backup_limit = float(config.get("Back_Up_Limit", 150000))
+
     # 第一行：Back Up 血量和 Free Fund
     col_backup, col_freefund = st.columns(2)
 
     with col_backup:
-        st.metric("Back Up 血量", f"${backup_balance:,.0f}")
+        st.markdown("**Back Up 血量**")
+        progress = max(0, min(backup_balance / backup_limit, 1.0)) if backup_limit > 0 else 0
+        st.progress(progress)
+        if backup_balance >= 0:
+            st.caption(f"${backup_balance:,.0f} / ${backup_limit:,.0f} ({progress*100:.0f}%)")
+        else:
+            st.warning(f"${backup_balance:,.0f} 需從其他帳戶轉帳補平")
 
     with col_freefund:
         st.metric("Free Fund", f"${free_fund_balance:,.0f}")
