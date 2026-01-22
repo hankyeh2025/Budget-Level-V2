@@ -195,6 +195,9 @@ def add_transaction(
         # 產生交易 ID
         trans_id = f"TXN{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
+        # 確保 amount 是 Python 原生類型
+        amount = float(amount)
+
         # 建立交易資料 - 對齊 Sheet 欄位順序
         # Txn_ID | Timestamp | Date | Type | Amount | Account | Category_ID | Sub_Tag_ID | Goal_ID | Target_Account | Item | Note | Ref
         row = [
