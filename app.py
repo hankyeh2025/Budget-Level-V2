@@ -299,6 +299,75 @@ def get_living_expenses_by_category() -> pd.DataFrame:
     return result
 
 
+def get_backup_balance() -> float:
+    """
+    Back Up 餘額 =
+        Config['Back_Up_Initial']
+        + sum(Allocate to Back_Up)
+        - sum(Settlement_Out)
+        + sum(Transfer to Back_Up)
+        - sum(Transfer from Back_Up)
+    """
+    config = load_config()
+    initial = float(config.get("Back_Up_Initial", 0))
+
+    df = load_transactions()
+    if df.empty:
+        return initial
+
+    balance = initial
+
+    # + sum(Allocate to Back_Up)
+    allocate_in = df[(df["Type"] == TYPE_ALLOCATE) & (df["Account"] == ACCOUNT_BACKUP)]["Amount"].sum()
+    balance += allocate_in
+
+    # - sum(Settlement_Out)
+    settlement_out = df[df["Type"] == TYPE_SETTLEMENT_OUT]["Amount"].sum()
+    balance -= settlement_out
+
+    # + sum(Transfer to Back_Up)
+    transfer_in = df[(df["Type"] == TYPE_TRANSFER) & (df["Target_Account"] == ACCOUNT_BACKUP)]["Amount"].sum()
+    balance += transfer_in
+
+    # - sum(Transfer from Back_Up)
+    transfer_out = df[(df["Type"] == TYPE_TRANSFER) & (df["Account"] == ACCOUNT_BACKUP)]["Amount"].sum()
+    balance -= transfer_out
+
+    return balance
+
+
+def get_free_fund_balance() -> float:
+    """
+    Free Fund 餘額 =
+        Config['Free_Fund_Initial']
+        + sum(Settlement_In)
+        + sum(Transfer to Free_Fund)
+        - sum(Transfer from Free_Fund)
+    """
+    config = load_config()
+    initial = float(config.get("Free_Fund_Initial", 0))
+
+    df = load_transactions()
+    if df.empty:
+        return initial
+
+    balance = initial
+
+    # + sum(Settlement_In)
+    settlement_in = df[df["Type"] == TYPE_SETTLEMENT_IN]["Amount"].sum()
+    balance += settlement_in
+
+    # + sum(Transfer to Free_Fund)
+    transfer_in = df[(df["Type"] == TYPE_TRANSFER) & (df["Target_Account"] == ACCOUNT_FREEFUND)]["Amount"].sum()
+    balance += transfer_in
+
+    # - sum(Transfer from Free_Fund)
+    transfer_out = df[(df["Type"] == TYPE_TRANSFER) & (df["Account"] == ACCOUNT_FREEFUND)]["Amount"].sum()
+    balance -= transfer_out
+
+    return balance
+
+
 # =============================================================================
 # UI 元件
 # =============================================================================
@@ -448,7 +517,22 @@ def render_status_overview():
     living_remaining = total_budget - total_expense
     daily_available = living_remaining / days_left if days_left > 0 else 0
 
-    # 顯示狀態卡片
+    # 取得 Back Up 和 Free Fund 餘額
+    backup_balance = get_backup_balance()
+    free_fund_balance = get_free_fund_balance()
+
+    # 第一行：Back Up 血量和 Free Fund
+    col_backup, col_freefund = st.columns(2)
+
+    with col_backup:
+        st.metric("Back Up 血量", f"${backup_balance:,.0f}")
+
+    with col_freefund:
+        st.metric("Free Fund", f"${free_fund_balance:,.0f}")
+
+    st.divider()
+
+    # 第二行：本期資訊
     st.markdown(f"**本期：{period_start.strftime('%m/%d')} ~ {period_end.strftime('%m/%d')}** （剩餘 {days_left} 天）")
 
     col1, col2, col3 = st.columns(3)
