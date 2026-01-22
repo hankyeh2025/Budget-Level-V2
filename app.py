@@ -222,6 +222,102 @@ def add_transaction(
         return False
 
 
+def add_saving_goal(name: str, target_amount: float, deadline: str = "") -> bool:
+    """新增儲蓄目標"""
+    spreadsheet = get_spreadsheet()
+    if spreadsheet is None:
+        return False
+
+    try:
+        worksheet = spreadsheet.worksheet(SHEET_SAVING_GOAL)
+
+        # 產生 Goal_ID
+        goal_id = f"GOAL{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        # 欄位順序：Goal_ID | Name | Target_Amount | Deadline | Accumulated | Status | Created_At | Completed_At
+        row = [
+            goal_id,
+            name,
+            target_amount,
+            deadline,  # 空字串 = 無截止日
+            0,  # Accumulated (初始為 0)
+            "Active",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ""  # Completed_At
+        ]
+
+        worksheet.append_row(row, value_input_option="USER_ENTERED")
+        st.cache_data.clear()
+        return True
+
+    except Exception as e:
+        st.error(f"新增儲蓄目標失敗: {e}")
+        return False
+
+
+def complete_saving_goal(goal_id: str, actual_expense: float, note: str = "") -> bool:
+    """
+    完成儲蓄目標
+    1. 寫入 Saving_Complete 交易
+    2. 若有正差額，寫入 Settlement_In（進 Free Fund）
+    3. 更新 Saving_Goal 的 Status 和 Completed_At
+    """
+    spreadsheet = get_spreadsheet()
+    if spreadsheet is None:
+        return False
+
+    try:
+        # 1. 計算累積金額
+        accumulated = get_goal_accumulated(goal_id)
+
+        # 2. 寫入 Saving_Complete 交易
+        success = add_transaction(
+            trans_type=TYPE_SAVING_COMPLETE,
+            amount=actual_expense,
+            account=ACCOUNT_SAVING,
+            goal_id=goal_id,
+            item="儲蓄目標完成",
+            note=note,
+            ref="Goal_Complete"
+        )
+        if not success:
+            return False
+
+        # 3. 若有正差額，寫入 Settlement_In
+        difference = accumulated - actual_expense
+        if difference > 0:
+            add_transaction(
+                trans_type=TYPE_SETTLEMENT_IN,
+                amount=difference,
+                account=ACCOUNT_FREEFUND,
+                goal_id=goal_id,
+                item="儲蓄目標差額",
+                note=f"目標完成差額 ${difference:,.0f}",
+                ref="Goal_Surplus"
+            )
+
+        # 4. 更新 Saving_Goal sheet 的 Status 和 Completed_At
+        worksheet = spreadsheet.worksheet(SHEET_SAVING_GOAL)
+        all_data = worksheet.get_all_records()
+
+        # 找到該 Goal 的 row（header 是第 1 行，資料從第 2 行開始）
+        for idx, row in enumerate(all_data):
+            if row.get("Goal_ID") == goal_id:
+                row_number = idx + 2  # +2 因為 header 佔第 1 行，idx 從 0 開始
+
+                # Status 在第 6 欄 (F)，Completed_At 在第 8 欄 (H)
+                worksheet.update_cell(row_number, 6, "Completed")  # Status
+                worksheet.update_cell(row_number, 8, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))  # Completed_At
+                break
+
+        st.cache_data.clear()
+        return True
+
+    except Exception as e:
+        st.error(f"完成儲蓄目標失敗: {e}")
+        return False
+
+
 # =============================================================================
 # 工具函式
 # =============================================================================
@@ -368,9 +464,98 @@ def get_free_fund_balance() -> float:
     return balance
 
 
+def get_investing_total() -> float:
+    """計算投資累積總額"""
+    df = load_transactions()
+    if df.empty:
+        return 0
+    return df[df["Type"] == TYPE_INVESTING_CONFIRM]["Amount"].sum()
+
+
+def get_goal_accumulated(goal_id: str) -> float:
+    """計算單一儲蓄目標的累積金額"""
+    df = load_transactions()
+    if df.empty:
+        return 0
+
+    # + Saving_In
+    saving_in = df[(df["Type"] == TYPE_SAVING_IN) & (df["Goal_ID"] == goal_id)]["Amount"].sum()
+
+    # - Saving_Complete
+    saving_complete = df[(df["Type"] == TYPE_SAVING_COMPLETE) & (df["Goal_ID"] == goal_id)]["Amount"].sum()
+
+    return saving_in - saving_complete
+
+
+def check_investing_confirmed_this_period() -> bool:
+    """檢查本期是否已確認投資"""
+    df = get_period_transactions()
+    if df.empty:
+        return False
+    return not df[df["Type"] == TYPE_INVESTING_CONFIRM].empty
+
+
 # =============================================================================
 # UI 元件
 # =============================================================================
+
+@st.dialog("新增儲蓄目標")
+def dialog_add_goal():
+    """新增儲蓄目標 Dialog"""
+    name = st.text_input("目標名稱 *")
+    target_amount = st.number_input("目標金額 *", min_value=0, step=1000, value=0)
+    deadline = st.date_input("截止日期（選填，有填 = Hard 目標）", value=None)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True):
+            st.rerun()
+    with col2:
+        if st.button("建立目標", type="primary", use_container_width=True):
+            if not name:
+                st.error("請輸入目標名稱")
+            elif target_amount <= 0:
+                st.error("請輸入有效金額")
+            else:
+                deadline_str = deadline.strftime("%Y-%m-%d") if deadline else ""
+                if add_saving_goal(name, target_amount, deadline_str):
+                    st.toast(f"已建立目標：{name}")
+                    st.rerun()
+
+
+@st.dialog("完成儲蓄目標")
+def dialog_complete_goal(goal_id: str, goal_name: str, accumulated: float):
+    """完成儲蓄目標 Dialog"""
+    st.markdown(f"**目標：** {goal_name}")
+    st.markdown(f"**累積金額：** ${accumulated:,.0f}")
+    st.divider()
+
+    actual_expense = st.number_input(
+        "實際支出金額 *",
+        min_value=0,
+        step=100,
+        value=int(accumulated)
+    )
+
+    # 計算差額
+    difference = accumulated - actual_expense
+    if difference > 0:
+        st.success(f"差額 ${difference:,.0f} 將進入自由支配金")
+    elif difference < 0:
+        st.warning(f"超出累積 ${-difference:,.0f}，不會產生自由支配金")
+
+    note = st.text_input("備註（選填）")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True):
+            st.rerun()
+    with col2:
+        if st.button("確認完成", type="primary", use_container_width=True):
+            if complete_saving_goal(goal_id, actual_expense, note):
+                st.toast(f"已完成目標：{goal_name}")
+                st.rerun()
+
 
 def render_quick_expense_form():
     """快速記帳表單"""
@@ -635,16 +820,90 @@ def tab_expense():
 
 
 def tab_goals():
-    """Tab 2: 目標（Phase 3 實作）"""
-    st.subheader("目標管理")
-    st.info("此功能將在 Phase 3 實作")
+    """Tab 2: 目標"""
 
-    # 預留：顯示儲蓄目標
+    # ===== 投資卡片（置頂）=====
+    config = load_config()
+    investing_total = get_investing_total()
+    long_term_target = float(config.get("Investing_Long_Term_Target", 500000))
+    is_confirmed = check_investing_confirmed_this_period()
+
+    with st.container(border=True):
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown("### 投資累積")
+        with col2:
+            if is_confirmed:
+                st.success("本月已確認")
+            else:
+                st.warning("待確認")
+
+        st.markdown(f"## ${investing_total:,.0f}")
+
+        progress = min(investing_total / long_term_target, 1.0) if long_term_target > 0 else 0
+        st.progress(progress)
+        st.caption(f"長期目標 ${long_term_target:,.0f} ({progress*100:.0f}%)")
+
+    st.divider()
+
+    # ===== 進行中的儲蓄目標 =====
+    st.markdown("### 進行中的儲蓄目標")
+
     goals = load_saving_goals()
-    if not goals.empty:
-        st.dataframe(goals, use_container_width=True)
+
+    if goals.empty:
+        st.info("尚無儲蓄目標")
     else:
-        st.write("尚無儲蓄目標")
+        active_goals = goals[goals["Status"] == "Active"]
+        completed_goals = goals[goals["Status"] == "Completed"]
+
+        if active_goals.empty:
+            st.info("目前沒有進行中的目標")
+        else:
+            for _, goal in active_goals.iterrows():
+                goal_id = goal["Goal_ID"]
+                goal_name = goal["Name"]
+                target_amount = float(goal.get("Target_Amount", 0))
+                deadline = goal.get("Deadline", "")
+
+                # 計算即時累積（從交易記錄）
+                accumulated = get_goal_accumulated(goal_id)
+
+                with st.container(border=True):
+                    st.markdown(f"#### {goal_name}")
+                    st.markdown(f"## ${accumulated:,.0f}")
+
+                    # 進度條
+                    progress = min(accumulated / target_amount, 1.0) if target_amount > 0 else 0
+                    st.progress(progress)
+
+                    # 目標資訊
+                    info_text = f"目標 ${target_amount:,.0f} ({progress*100:.0f}%)"
+                    if deadline:
+                        info_text += f" | 截止 {deadline}（Hard）"
+                    else:
+                        info_text += " | 無截止日"
+                    st.caption(info_text)
+
+                    # 完成按鈕
+                    if st.button("完成目標", key=f"complete_{goal_id}"):
+                        dialog_complete_goal(goal_id, goal_name, accumulated)
+
+    # ===== 新增目標按鈕 =====
+    st.divider()
+    if st.button("新增儲蓄目標", use_container_width=True):
+        dialog_add_goal()
+
+    # ===== 已完成目標 =====
+    if not goals.empty:
+        completed_goals = goals[goals["Status"] == "Completed"]
+        if not completed_goals.empty:
+            st.divider()
+            with st.expander("已完成"):
+                for _, goal in completed_goals.iterrows():
+                    completed_at = goal.get("Completed_At", "")
+                    target = float(goal.get("Target_Amount", 0))
+                    st.markdown(f"**{goal['Name']}** — ${target:,.0f} — {completed_at}")
 
 
 def tab_strategy():
