@@ -7,7 +7,7 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 # =============================================================================
@@ -499,6 +499,207 @@ def check_investing_confirmed_this_period() -> bool:
 
 
 # =============================================================================
+# Phase 4: 結算相關函式
+# =============================================================================
+
+def get_previous_period() -> tuple[date, date]:
+    """
+    取得上一個發薪週期
+    Returns: (period_start, period_end)
+    """
+    import calendar
+
+    pay_day = get_pay_day()
+    current_start, _ = get_current_period()
+
+    # 上期結束日 = 本期開始日前一天
+    prev_end = current_start - timedelta(days=1)
+
+    # 計算上期開始日
+    if prev_end.month == 1:
+        prev_year = prev_end.year - 1
+        prev_month = 12
+    else:
+        prev_year = prev_end.year
+        prev_month = prev_end.month - 1
+
+    # 處理月份天數不足的情況（例如發薪日 31 號但該月只有 30 天）
+    last_day_of_month = calendar.monthrange(prev_year, prev_month)[1]
+    actual_pay_day = min(pay_day, last_day_of_month)
+    prev_start = date(prev_year, prev_month, actual_pay_day)
+
+    return prev_start, prev_end
+
+
+def check_period_settled(period_start: date) -> bool:
+    """檢查指定週期是否已結算"""
+    spreadsheet = get_spreadsheet()
+    if spreadsheet is None:
+        return True  # 無法檢查時預設已結算，避免卡住
+
+    try:
+        worksheet = spreadsheet.worksheet(SHEET_SETTLEMENT_LOG)
+        data = worksheet.get_all_records()
+
+        period_str = period_start.strftime("%Y-%m-%d")
+        for row in data:
+            if row.get("Period_Start") == period_str:
+                return True
+        return False
+    except Exception:
+        return True  # 出錯時預設已結算
+
+
+def get_period_summary(period_start: date, period_end: date) -> dict:
+    """
+    計算指定週期的完整摘要
+    Returns: {
+        'income': float,           # 總收入
+        'living_budget': float,    # Living 預算
+        'living_expense': float,   # Living 實際支出
+        'living_net': float,       # Living 結餘（正）或超支（負）
+        'saving_in': float,        # Saving 累積
+        'investing': float,        # Investing 確認金額
+        'backup_allocate': float,  # Back Up 框定
+    }
+    """
+    df = load_transactions()
+    categories = load_categories()
+
+    # 預設值
+    result = {
+        'income': 0,
+        'living_budget': 0,
+        'living_expense': 0,
+        'living_net': 0,
+        'saving_in': 0,
+        'investing': 0,
+        'backup_allocate': 0,
+    }
+
+    # Living 預算 = Category 加總
+    if not categories.empty and "Budget" in categories.columns:
+        result['living_budget'] = float(categories["Budget"].sum())
+
+    if df.empty:
+        result['living_net'] = result['living_budget']
+        return result
+
+    # 過濾該週期的交易
+    mask = (df["Date"].dt.date >= period_start) & (df["Date"].dt.date <= period_end)
+    period_df = df[mask]
+
+    if period_df.empty:
+        result['living_net'] = result['living_budget']
+        return result
+
+    # 收入
+    result['income'] = float(period_df[period_df["Type"] == TYPE_INCOME]["Amount"].sum())
+
+    # Living 支出
+    living_expense = period_df[
+        (period_df["Type"] == TYPE_EXPENSE) &
+        (period_df["Account"] == ACCOUNT_LIVING)
+    ]["Amount"].sum()
+    result['living_expense'] = float(living_expense)
+
+    # Living 結餘
+    result['living_net'] = result['living_budget'] - result['living_expense']
+
+    # Saving 累積
+    result['saving_in'] = float(period_df[period_df["Type"] == TYPE_SAVING_IN]["Amount"].sum())
+
+    # Investing 確認
+    result['investing'] = float(period_df[period_df["Type"] == TYPE_INVESTING_CONFIRM]["Amount"].sum())
+
+    # Back Up 框定
+    backup_allocate = period_df[
+        (period_df["Type"] == TYPE_ALLOCATE) &
+        (period_df["Account"] == ACCOUNT_BACKUP)
+    ]["Amount"].sum()
+    result['backup_allocate'] = float(backup_allocate)
+
+    return result
+
+
+def execute_settlement(period_start: date, period_end: date, net_result: float) -> bool:
+    """
+    執行結算
+    - net_result > 0: 結餘，產生 Settlement_In（進 Free Fund）
+    - net_result < 0: 超支，產生 Settlement_Out（扣 Back Up）
+    - net_result = 0: 不產生交易，只記錄 Settlement_Log
+    """
+    spreadsheet = get_spreadsheet()
+    if spreadsheet is None:
+        return False
+
+    try:
+        # 1. 產生結算交易（若非零）
+        if net_result > 0:
+            add_transaction(
+                trans_type=TYPE_SETTLEMENT_IN,
+                amount=net_result,
+                account=ACCOUNT_FREEFUND,
+                item="月結算結餘",
+                ref=f"Settlement_{period_start.strftime('%Y%m')}"
+            )
+            impact_account = ACCOUNT_FREEFUND
+        elif net_result < 0:
+            add_transaction(
+                trans_type=TYPE_SETTLEMENT_OUT,
+                amount=abs(net_result),
+                account=ACCOUNT_BACKUP,
+                item="月結算超支",
+                ref=f"Settlement_{period_start.strftime('%Y%m')}"
+            )
+            impact_account = ACCOUNT_BACKUP
+        else:
+            impact_account = "None"
+
+        # 2. 寫入 Settlement_Log
+        worksheet = spreadsheet.worksheet(SHEET_SETTLEMENT_LOG)
+        settlement_id = f"STL{period_start.strftime('%Y%m')}"
+
+        # 取得完整摘要用於記錄
+        summary = get_period_summary(period_start, period_end)
+
+        row = [
+            settlement_id,                                    # Settlement_ID
+            period_start.strftime("%Y-%m-%d"),                # Period_Start
+            period_end.strftime("%Y-%m-%d"),                  # Period_End
+            summary['living_budget'],                         # Total_Budget
+            summary['living_expense'],                        # Total_Expense
+            net_result,                                       # Net_Result
+            impact_account,                                   # Impact_Account
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")      # Settled_At
+        ]
+
+        worksheet.append_row(row, value_input_option="USER_ENTERED")
+        st.cache_data.clear()
+        return True
+
+    except Exception as e:
+        st.error(f"結算失敗: {e}")
+        return False
+
+
+def execute_transfer(from_account: str, to_account: str, amount: float, note: str = "") -> bool:
+    """執行帳戶轉帳"""
+    if amount <= 0:
+        return False
+
+    return add_transaction(
+        trans_type=TYPE_TRANSFER,
+        amount=amount,
+        account=from_account,
+        target_account=to_account,
+        item="帳戶轉帳",
+        note=note,
+        ref="Manual_Transfer"
+    )
+
+
+# =============================================================================
 # UI 元件
 # =============================================================================
 
@@ -558,6 +759,128 @@ def dialog_complete_goal(goal_id: str, goal_name: str, accumulated: float):
             if complete_saving_goal(goal_id, actual_expense, note):
                 st.toast(f"已完成目標：{goal_name}")
                 st.rerun()
+
+
+# =============================================================================
+# Phase 4: Dialog 元件
+# =============================================================================
+
+@st.dialog("月結算確認", width="large")
+def dialog_settlement(period_start: date, period_end: date):
+    """結算確認 Dialog"""
+    summary = get_period_summary(period_start, period_end)
+    net = summary['living_net']
+
+    # 標題
+    st.markdown(f"**期間：** {period_start.strftime('%Y/%m/%d')} ~ {period_end.strftime('%Y/%m/%d')}")
+
+    st.divider()
+
+    # Living 摘要
+    st.markdown("### Living 執行狀況")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("預算", f"${summary['living_budget']:,.0f}")
+    with col2:
+        st.metric("實際支出", f"${summary['living_expense']:,.0f}")
+    with col3:
+        delta_label = "結餘" if net >= 0 else "超支"
+        st.metric(delta_label, f"${net:,.0f}")
+
+    st.divider()
+
+    # 結算影響
+    st.markdown("### 結算結果")
+
+    backup_before = get_backup_balance()
+    freefund_before = get_free_fund_balance()
+
+    if net > 0:
+        st.success(f"結餘 ${net:,.0f} 將進入 **Free Fund**")
+        st.markdown(f"- Free Fund：${freefund_before:,.0f} → ${freefund_before + net:,.0f}")
+    elif net < 0:
+        st.warning(f"超支 ${abs(net):,.0f} 將從 **Back Up** 扣除")
+        st.markdown(f"- Back Up：${backup_before:,.0f} → ${backup_before + net:,.0f}")
+    else:
+        st.info("本期收支平衡，無需調整帳戶")
+
+    st.divider()
+
+    # 按鈕
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True, key="settlement_cancel"):
+            st.rerun()
+    with col2:
+        if st.button("確認結算", type="primary", use_container_width=True, key="settlement_confirm"):
+            if execute_settlement(period_start, period_end, net):
+                st.toast("結算完成！")
+                st.rerun()
+
+
+@st.dialog("帳戶轉帳")
+def dialog_transfer():
+    """帳戶轉帳 Dialog"""
+
+    # 帳戶選項
+    accounts = [ACCOUNT_FREEFUND, ACCOUNT_BACKUP, ACCOUNT_SAVING, ACCOUNT_INVESTING, ACCOUNT_LIVING]
+    account_labels = {
+        ACCOUNT_FREEFUND: "Free Fund（自由支配金）",
+        ACCOUNT_BACKUP: "Back Up（儲備）",
+        ACCOUNT_SAVING: "Saving（儲蓄）",
+        ACCOUNT_INVESTING: "Investing（投資）",
+        ACCOUNT_LIVING: "Living（生活）"
+    }
+
+    # 來源帳戶
+    from_account = st.selectbox(
+        "從",
+        accounts,
+        format_func=lambda x: account_labels.get(x, x),
+        key="transfer_from"
+    )
+
+    # 目標帳戶（排除已選的來源）
+    to_options = [a for a in accounts if a != from_account]
+    to_account = st.selectbox(
+        "到",
+        to_options,
+        format_func=lambda x: account_labels.get(x, x),
+        key="transfer_to"
+    )
+
+    # 金額
+    amount = st.number_input("金額", min_value=0, step=100, value=0, key="transfer_amount")
+
+    # 備註
+    note = st.text_input("備註（選填）", key="transfer_note")
+
+    # 警告訊息
+    warnings = {
+        ACCOUNT_BACKUP: "將動用緊急儲備",
+        ACCOUNT_SAVING: "將影響儲蓄目標進度",
+        ACCOUNT_INVESTING: "將減少投資累積",
+        ACCOUNT_LIVING: "將減少本月可用預算"
+    }
+
+    if from_account in warnings:
+        st.warning(warnings[from_account])
+
+    st.divider()
+
+    # 按鈕
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True, key="transfer_cancel"):
+            st.rerun()
+    with col2:
+        if st.button("確認轉帳", type="primary", use_container_width=True, key="transfer_confirm"):
+            if amount <= 0:
+                st.error("請輸入有效金額")
+            else:
+                if execute_transfer(from_account, to_account, amount, note):
+                    st.toast(f"已轉帳 ${amount:,.0f}")
+                    st.rerun()
 
 
 def render_quick_expense_form():
@@ -910,16 +1233,167 @@ def tab_goals():
 
 
 def tab_strategy():
-    """Tab 3: 策略（Phase 4 實作）"""
-    st.subheader("策略管理")
-    st.info("此功能將在 Phase 4 實作")
+    """Tab 3: 策略"""
 
-    # 預留：顯示設定
+    # ===== 1. 待處理結算區 =====
+    prev_start, prev_end = get_previous_period()
+    is_settled = check_period_settled(prev_start)
+
+    if not is_settled:
+        with st.container(border=True):
+            st.markdown("### 上期未結算")
+            st.markdown(f"**期間：** {prev_start.strftime('%m/%d')} ~ {prev_end.strftime('%m/%d')}")
+
+            summary = get_period_summary(prev_start, prev_end)
+            net = summary['living_net']
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Living 預算", f"${summary['living_budget']:,.0f}")
+            with col2:
+                st.metric("實際支出", f"${summary['living_expense']:,.0f}")
+            with col3:
+                if net >= 0:
+                    st.metric("結餘", f"${net:,.0f}", delta="→ Free Fund")
+                else:
+                    st.metric("超支", f"${net:,.0f}", delta="→ 扣 Back Up")
+
+            if st.button("查看明細並確認結算", use_container_width=True, type="primary"):
+                dialog_settlement(prev_start, prev_end)
+
+        st.divider()
+
+    # ===== 2. 框定總覽 =====
+    st.markdown("### 框定總覽")
+
     config = load_config()
-    if config:
-        st.json(config)
-    else:
-        st.write("尚無系統設定")
+    categories = load_categories()
+
+    # 取得本期資料
+    period_start, period_end = get_current_period()
+    current_summary = get_period_summary(period_start, period_end)
+
+    # 計算各項目
+    monthly_income = float(config.get("Monthly_Income", 0))
+    total_income = monthly_income + current_summary['income']  # 定期 + 非定期
+
+    living_budget = current_summary['living_budget']
+    saving_in = current_summary['saving_in']
+    investing_target = float(config.get("Investing_Monthly_Target", 10000))
+    backup_allocate = current_summary['backup_allocate']
+
+    total_allocate = living_budget + saving_in + investing_target + backup_allocate
+    free_fund_allocate = total_income - total_allocate
+
+    with st.container(border=True):
+        # 收入
+        st.markdown(f"**本期收入**")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"定期收入：${monthly_income:,.0f}")
+        with col2:
+            st.markdown(f"非定期收入：${current_summary['income']:,.0f}")
+        st.markdown(f"**合計：${total_income:,.0f}**")
+
+        st.divider()
+
+        # 框定明細
+        st.markdown("**框定分配**")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"Living：${living_budget:,.0f}")
+            st.markdown(f"Saving：${saving_in:,.0f}")
+        with col2:
+            st.markdown(f"Investing：${investing_target:,.0f}")
+            st.markdown(f"Back Up：${backup_allocate:,.0f}")
+
+        st.divider()
+
+        # 總覽
+        st.markdown(f"**框定合計：${total_allocate:,.0f}**")
+
+        if free_fund_allocate >= 0:
+            st.success(f"→ Free Fund：${free_fund_allocate:,.0f}")
+        else:
+            st.error(f"框定超過收入 ${abs(free_fund_allocate):,.0f}")
+
+    st.divider()
+
+    # ===== 3. 帳戶餘額 =====
+    st.markdown("### 帳戶餘額")
+
+    backup_balance = get_backup_balance()
+    freefund_balance = get_free_fund_balance()
+    investing_total = get_investing_total()
+    backup_limit = float(config.get("Back_Up_Limit", 150000))
+    investing_target_long = float(config.get("Investing_Long_Term_Target", 500000))
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Back Up
+        st.markdown("**Back Up**")
+        progress = max(0, min(backup_balance / backup_limit, 1.0)) if backup_limit > 0 else 0
+        st.progress(progress)
+        if backup_balance >= 0:
+            st.caption(f"${backup_balance:,.0f} / ${backup_limit:,.0f} ({progress*100:.0f}%)")
+        else:
+            st.warning(f"${backup_balance:,.0f} 負數")
+
+    with col2:
+        # Free Fund
+        st.metric("Free Fund", f"${freefund_balance:,.0f}")
+
+    # Investing
+    st.markdown("**Investing 累積**")
+    inv_progress = min(investing_total / investing_target_long, 1.0) if investing_target_long > 0 else 0
+    st.progress(inv_progress)
+    st.caption(f"${investing_total:,.0f} / ${investing_target_long:,.0f} ({inv_progress*100:.0f}%)")
+
+    st.divider()
+
+    # ===== 4. 帳戶轉帳 =====
+    st.markdown("### 帳戶轉帳")
+
+    if st.button("進行轉帳", use_container_width=True):
+        dialog_transfer()
+
+    st.divider()
+
+    # ===== 5. 系統設定（唯讀） =====
+    with st.expander("系統設定"):
+        st.markdown("**目前設定值：**")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"發薪日：每月 **{config.get('Pay_Day', 5)}** 號")
+            st.markdown(f"定期收入：**${float(config.get('Monthly_Income', 0)):,.0f}**")
+        with col2:
+            st.markdown(f"Back Up 上限：**${float(config.get('Back_Up_Limit', 150000)):,.0f}**")
+            st.markdown(f"投資月目標：**${float(config.get('Investing_Monthly_Target', 10000)):,.0f}**")
+
+        st.caption("如需修改設定，請直接編輯 Google Sheets 的 Config 表")
+
+    # ===== 6. 資料匯出 =====
+    with st.expander("資料匯出"):
+        df = load_transactions()
+        if not df.empty:
+            # 轉換日期格式
+            export_df = df.copy()
+            if "Date" in export_df.columns:
+                export_df["Date"] = export_df["Date"].dt.strftime("%Y-%m-%d")
+
+            csv = export_df.to_csv(index=False).encode('utf-8-sig')  # 使用 utf-8-sig 讓 Excel 正確顯示中文
+            st.download_button(
+                label="下載完整交易記錄 (CSV)",
+                data=csv,
+                file_name=f"budget_level_export_{date.today().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        else:
+            st.info("尚無交易記錄可匯出")
 
 
 # =============================================================================
