@@ -9,10 +9,25 @@ from google.oauth2.service_account import Credentials
 import pandas as pd
 from datetime import datetime, date, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 # =============================================================================
 # 常數定義
 # =============================================================================
+
+# 台灣時區
+TAIWAN_TZ = ZoneInfo("Asia/Taipei")
+
+
+def get_taiwan_now() -> datetime:
+    """取得台灣時間"""
+    return datetime.now(TAIWAN_TZ)
+
+
+def get_taiwan_today() -> date:
+    """取得台灣日期"""
+    return datetime.now(TAIWAN_TZ).date()
+
 
 # 五個心理帳戶
 ACCOUNT_LIVING = "Living"
@@ -84,88 +99,81 @@ def get_spreadsheet():
 # =============================================================================
 
 @st.cache_data(ttl=60)
-def load_categories() -> pd.DataFrame:
-    """載入 Living 科目"""
+def load_all_data() -> dict:
+    """一次載入所有資料（減少 API 呼叫）"""
     spreadsheet = get_spreadsheet()
     if spreadsheet is None:
-        return pd.DataFrame()
+        return {
+            "categories": pd.DataFrame(),
+            "sub_tags": pd.DataFrame(),
+            "saving_goals": pd.DataFrame(),
+            "transactions": pd.DataFrame(),
+            "config": {}
+        }
+
     try:
-        worksheet = spreadsheet.worksheet(SHEET_CATEGORY)
-        data = worksheet.get_all_records()
-        return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"載入科目失敗: {e}")
-        return pd.DataFrame()
+        data = {}
 
+        # Categories
+        ws = spreadsheet.worksheet(SHEET_CATEGORY)
+        data["categories"] = pd.DataFrame(ws.get_all_records())
 
-@st.cache_data(ttl=60)
-def load_sub_tags() -> pd.DataFrame:
-    """載入科目子類"""
-    spreadsheet = get_spreadsheet()
-    if spreadsheet is None:
-        return pd.DataFrame()
-    try:
-        worksheet = spreadsheet.worksheet(SHEET_SUB_TAG)
-        data = worksheet.get_all_records()
-        return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"載入子類失敗: {e}")
-        return pd.DataFrame()
+        # Sub_Tags
+        ws = spreadsheet.worksheet(SHEET_SUB_TAG)
+        data["sub_tags"] = pd.DataFrame(ws.get_all_records())
 
+        # Saving_Goals
+        ws = spreadsheet.worksheet(SHEET_SAVING_GOAL)
+        data["saving_goals"] = pd.DataFrame(ws.get_all_records())
 
-@st.cache_data(ttl=60)
-def load_saving_goals() -> pd.DataFrame:
-    """載入儲蓄目標"""
-    spreadsheet = get_spreadsheet()
-    if spreadsheet is None:
-        return pd.DataFrame()
-    try:
-        worksheet = spreadsheet.worksheet(SHEET_SAVING_GOAL)
-        data = worksheet.get_all_records()
-        return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"載入儲蓄目標失敗: {e}")
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=60)
-def load_transactions() -> pd.DataFrame:
-    """載入所有交易記錄"""
-    spreadsheet = get_spreadsheet()
-    if spreadsheet is None:
-        return pd.DataFrame()
-    try:
-        worksheet = spreadsheet.worksheet(SHEET_TRANSACTION)
-        data = worksheet.get_all_records()
-        df = pd.DataFrame(data)
+        # Transactions
+        ws = spreadsheet.worksheet(SHEET_TRANSACTION)
+        df = pd.DataFrame(ws.get_all_records())
         if not df.empty and "Date" in df.columns:
             df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        return df
+        data["transactions"] = df
+
+        # Config
+        ws = spreadsheet.worksheet(SHEET_CONFIG)
+        config_data = ws.get_all_records()
+        data["config"] = {row["Key"]: row["Value"] for row in config_data if "Key" in row}
+
+        return data
+
     except Exception as e:
-        st.error(f"載入交易記錄失敗: {e}")
-        return pd.DataFrame()
+        st.error(f"載入資料失敗: {e}")
+        return {
+            "categories": pd.DataFrame(),
+            "sub_tags": pd.DataFrame(),
+            "saving_goals": pd.DataFrame(),
+            "transactions": pd.DataFrame(),
+            "config": {}
+        }
 
 
-@st.cache_data(ttl=60)
+def load_categories() -> pd.DataFrame:
+    """載入 Living 科目"""
+    return load_all_data()["categories"]
+
+
+def load_sub_tags() -> pd.DataFrame:
+    """載入科目子類"""
+    return load_all_data()["sub_tags"]
+
+
+def load_saving_goals() -> pd.DataFrame:
+    """載入儲蓄目標"""
+    return load_all_data()["saving_goals"]
+
+
+def load_transactions() -> pd.DataFrame:
+    """載入所有交易記錄"""
+    return load_all_data()["transactions"]
+
+
 def load_config() -> dict:
     """載入系統設定"""
-    spreadsheet = get_spreadsheet()
-    if spreadsheet is None:
-        return {}
-    try:
-        worksheet = spreadsheet.worksheet(SHEET_CONFIG)
-        data = worksheet.get_all_records()
-        if data:
-            # 假設 Config 是 key-value 格式
-            config = {}
-            for row in data:
-                if "Key" in row and "Value" in row:
-                    config[row["Key"]] = row["Value"]
-            return config
-        return {}
-    except Exception as e:
-        st.error(f"載入設定失敗: {e}")
-        return {}
+    return load_all_data()["config"]
 
 
 # =============================================================================
@@ -193,7 +201,7 @@ def add_transaction(
         worksheet = spreadsheet.worksheet(SHEET_TRANSACTION)
 
         # 產生交易 ID
-        trans_id = f"TXN{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        trans_id = f"TXN{get_taiwan_now().strftime('%Y%m%d%H%M%S')}"
 
         # 確保 amount 是 Python 原生類型
         amount = float(amount)
@@ -202,8 +210,8 @@ def add_transaction(
         # Txn_ID | Timestamp | Date | Type | Amount | Account | Category_ID | Sub_Tag_ID | Goal_ID | Target_Account | Item | Note | Ref
         row = [
             trans_id,                                      # Txn_ID
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Timestamp (完整時間)
-            datetime.now().strftime("%Y-%m-%d"),           # Date (只有日期)
+            get_taiwan_now().strftime("%Y-%m-%d %H:%M:%S"),  # Timestamp (完整時間)
+            get_taiwan_now().strftime("%Y-%m-%d"),           # Date (只有日期)
             trans_type,                                    # Type
             amount,                                        # Amount
             account,                                       # Account
@@ -235,7 +243,7 @@ def add_saving_goal(name: str, target_amount: float, deadline: str = "") -> bool
         worksheet = spreadsheet.worksheet(SHEET_SAVING_GOAL)
 
         # 產生 Goal_ID
-        goal_id = f"GOAL{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        goal_id = f"GOAL{get_taiwan_now().strftime('%Y%m%d%H%M%S')}"
 
         # 欄位順序：Goal_ID | Name | Target_Amount | Deadline | Accumulated | Status | Created_At | Completed_At
         row = [
@@ -245,7 +253,7 @@ def add_saving_goal(name: str, target_amount: float, deadline: str = "") -> bool
             deadline,  # 空字串 = 無截止日
             0,  # Accumulated (初始為 0)
             "Active",
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            get_taiwan_now().strftime("%Y-%m-%d %H:%M:%S"),
             ""  # Completed_At
         ]
 
@@ -310,7 +318,7 @@ def complete_saving_goal(goal_id: str, actual_expense: float, note: str = "") ->
 
                 # Status 在第 6 欄 (F)，Completed_At 在第 8 欄 (H)
                 worksheet.update_cell(row_number, 6, "Completed")  # Status
-                worksheet.update_cell(row_number, 8, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))  # Completed_At
+                worksheet.update_cell(row_number, 8, get_taiwan_now().strftime("%Y-%m-%d %H:%M:%S"))  # Completed_At
                 break
 
         st.cache_data.clear()
@@ -328,13 +336,14 @@ def complete_saving_goal(goal_id: str, actual_expense: float, note: str = "") ->
 def get_pay_day() -> int:
     """取得發薪日（預設 5 號）"""
     config = load_config()
-    return int(config.get("Pay_Day", 5))
+    # 相容兩種寫法：Payday 或 Pay_Day
+    return int(config.get("Payday", config.get("Pay_Day", 5)))
 
 
 def get_current_period() -> tuple[date, date]:
     """取得當前發薪週期的起始和結束日期"""
     pay_day = get_pay_day()
-    today = date.today()
+    today = get_taiwan_today()
 
     # 計算本期起始日
     if today.day >= pay_day:
@@ -360,7 +369,7 @@ def get_current_period() -> tuple[date, date]:
 def get_days_left_in_period() -> int:
     """計算本期剩餘天數"""
     _, period_end = get_current_period()
-    today = date.today()
+    today = get_taiwan_today()
     days_left = (period_end - today).days + 1  # 包含今天
     return max(days_left, 1)
 
@@ -671,7 +680,7 @@ def execute_settlement(period_start: date, period_end: date, net_result: float) 
             summary['living_expense'],                        # Total_Expense
             net_result,                                       # Net_Result
             impact_account,                                   # Impact_Account
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")      # Settled_At
+            get_taiwan_now().strftime("%Y-%m-%d %H:%M:%S")      # Settled_At
         ]
 
         worksheet.append_row(row, value_input_option="USER_ENTERED")
@@ -1232,10 +1241,8 @@ def tab_goals():
                     st.markdown(f"**{goal['Name']}** — ${target:,.0f} — {completed_at}")
 
 
-def tab_strategy():
-    """Tab 3: 策略"""
-
-    # ===== 1. 待處理結算區 =====
+def render_settlement_alert():
+    """渲染結算提示區"""
     prev_start, prev_end = get_previous_period()
     is_settled = check_period_settled(prev_start)
 
@@ -1263,11 +1270,12 @@ def tab_strategy():
 
         st.divider()
 
-    # ===== 2. 框定總覽 =====
+
+def render_allocation_overview():
+    """渲染框定總覽"""
     st.markdown("### 框定總覽")
 
     config = load_config()
-    categories = load_categories()
 
     # 取得本期資料
     period_start, period_end = get_current_period()
@@ -1320,9 +1328,12 @@ def tab_strategy():
 
     st.divider()
 
-    # ===== 3. 帳戶餘額 =====
+
+def render_account_balances():
+    """渲染帳戶餘額"""
     st.markdown("### 帳戶餘額")
 
+    config = load_config()
     backup_balance = get_backup_balance()
     freefund_balance = get_free_fund_balance()
     investing_total = get_investing_total()
@@ -1353,21 +1364,19 @@ def tab_strategy():
 
     st.divider()
 
-    # ===== 4. 帳戶轉帳 =====
-    st.markdown("### 帳戶轉帳")
 
-    if st.button("進行轉帳", use_container_width=True):
-        dialog_transfer()
+def render_settings_and_export():
+    """渲染設定與匯出"""
+    config = load_config()
 
-    st.divider()
-
-    # ===== 5. 系統設定（唯讀） =====
+    # 系統設定（唯讀）
     with st.expander("系統設定"):
         st.markdown("**目前設定值：**")
 
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown(f"發薪日：每月 **{config.get('Pay_Day', 5)}** 號")
+            pay_day = config.get("Payday", config.get("Pay_Day", 5))
+            st.markdown(f"發薪日：每月 **{pay_day}** 號")
             st.markdown(f"定期收入：**${float(config.get('Monthly_Income', 0)):,.0f}**")
         with col2:
             st.markdown(f"Back Up 上限：**${float(config.get('Back_Up_Limit', 150000)):,.0f}**")
@@ -1375,7 +1384,7 @@ def tab_strategy():
 
         st.caption("如需修改設定，請直接編輯 Google Sheets 的 Config 表")
 
-    # ===== 6. 資料匯出 =====
+    # 資料匯出
     with st.expander("資料匯出"):
         df = load_transactions()
         if not df.empty:
@@ -1388,12 +1397,26 @@ def tab_strategy():
             st.download_button(
                 label="下載完整交易記錄 (CSV)",
                 data=csv,
-                file_name=f"budget_level_export_{date.today().strftime('%Y%m%d')}.csv",
+                file_name=f"budget_level_export_{get_taiwan_today().strftime('%Y%m%d')}.csv",
                 mime="text/csv",
                 use_container_width=True
             )
         else:
             st.info("尚無交易記錄可匯出")
+
+
+def tab_strategy():
+    """Tab 3: 策略"""
+    render_settlement_alert()
+    render_allocation_overview()
+    render_account_balances()
+
+    st.markdown("### 帳戶轉帳")
+    if st.button("進行轉帳", use_container_width=True):
+        dialog_transfer()
+
+    st.divider()
+    render_settings_and_export()
 
 
 # =============================================================================
