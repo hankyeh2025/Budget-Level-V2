@@ -814,7 +814,7 @@ def dialog_settlement(period_start: date, period_end: date):
     with col2:
         if st.button("確認結算", type="primary", use_container_width=True, key="settlement_confirm"):
             if execute_settlement(period_start, period_end, net):
-                st.toast("結算完成！")
+                st.session_state["show_toast"] = "結算完成！"
                 st.rerun()
 
 
@@ -879,7 +879,7 @@ def dialog_transfer():
                 st.error("請輸入有效金額")
             else:
                 if execute_transfer(from_account, to_account, amount, note):
-                    st.toast(f"已轉帳 ${amount:,.0f}")
+                    st.session_state["show_toast"] = f"已轉帳 ${amount:,.0f}"
                     st.rerun()
 
 
@@ -1409,6 +1409,11 @@ def main():
 
     st.title("Budget Level v2")
     st.caption("心理帳戶管理系統")
+
+    # 顯示 Toast 訊息（從 session_state 讀取）
+    if "show_toast" in st.session_state:
+        st.toast(st.session_state["show_toast"])
+        del st.session_state["show_toast"]
 
     # 檢查連線
     if get_spreadsheet() is None:
