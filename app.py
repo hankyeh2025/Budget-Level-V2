@@ -676,6 +676,336 @@ def parse_amount(value: str) -> float:
         return 0.0
 
 
+# =============================================================================
+# Period 狀態函式
+# =============================================================================
+
+def is_period_overdue(period: pd.Series) -> bool:
+    """
+    檢查週期是否已過期（今天 > End_Date）
+
+    Args:
+        period: Period 資料列
+
+    Returns:
+        True if 今天已超過結束日
+    """
+    end_date = period["End_Date"]
+    if isinstance(end_date, str):
+        end_date = pd.to_datetime(end_date).date()
+    elif hasattr(end_date, 'date'):
+        end_date = end_date.date()
+    return get_taiwan_today() > end_date
+
+
+def get_period_by_id(period_id: str) -> Optional[pd.Series]:
+    """根據 ID 取得週期資料"""
+    periods = load_periods()
+    if periods.empty:
+        return None
+    match = periods[periods["Period_ID"] == period_id]
+    if match.empty:
+        return None
+    return match.iloc[0]
+
+
+def get_period_days_left(period: pd.Series) -> int:
+    """
+    計算週期剩餘天數（包含今天）
+
+    Returns:
+        剩餘天數，最小為 0
+    """
+    end_date = period["End_Date"]
+    if isinstance(end_date, str):
+        end_date = pd.to_datetime(end_date).date()
+    elif hasattr(end_date, 'date'):
+        end_date = end_date.date()
+
+    today = get_taiwan_today()
+    days_left = (end_date - today).days + 1
+    return max(days_left, 0)
+
+
+# =============================================================================
+# Living 計算函式
+# =============================================================================
+
+def get_living_remaining(period_id: str) -> float:
+    """
+    計算 Living 本期剩餘
+
+    公式：Living_Budget - Σ Expense(Account='Living', Period_ID=period_id)
+
+    Returns:
+        剩餘金額（可為負數表示超支）
+    """
+    period = get_period_by_id(period_id)
+    if period is None:
+        return 0.0
+
+    budget = float(period["Living_Budget"]) if period["Living_Budget"] else 0.0
+
+    transactions = load_transactions()
+    if transactions.empty:
+        return budget
+
+    expenses = transactions[
+        (transactions["Type"] == TYPE_EXPENSE) &
+        (transactions["Account"] == ACCOUNT_LIVING) &
+        (transactions["Period_ID"] == period_id)
+    ]
+    spent = float(expenses["Amount"].sum()) if not expenses.empty else 0.0
+
+    return budget - spent
+
+
+def get_daily_available(period_id: str) -> float:
+    """
+    計算今日可用額度
+
+    公式：Living 剩餘 ÷ 週期剩餘天數
+
+    Returns:
+        今日建議可用金額
+    """
+    remaining = get_living_remaining(period_id)
+    period = get_period_by_id(period_id)
+    if period is None:
+        return 0.0
+
+    days_left = get_period_days_left(period)
+
+    # 避免除以零，若剩餘天數為 0 則回傳全部剩餘
+    if days_left <= 0:
+        return remaining
+
+    return remaining / days_left
+
+
+def get_category_spent(category_id: str, period_id: str) -> float:
+    """計算特定科目本期支出"""
+    transactions = load_transactions()
+    if transactions.empty:
+        return 0.0
+
+    expenses = transactions[
+        (transactions["Type"] == TYPE_EXPENSE) &
+        (transactions["Category_ID"] == category_id) &
+        (transactions["Period_ID"] == period_id)
+    ]
+    return float(expenses["Amount"].sum()) if not expenses.empty else 0.0
+
+
+# =============================================================================
+# 帳戶餘額計算函式
+# =============================================================================
+
+def get_backup_balance() -> float:
+    """
+    計算 Back Up 餘額
+
+    公式：
+    Config['Back_Up_Initial']
+    + sum(Allocate to Back_Up) - 尚未實作
+    - sum(Settlement_Out)
+    + sum(Transfer to Back_Up)
+    - sum(Transfer from Back_Up)
+    """
+    config = load_config()
+    initial = float(config.get("Back_Up_Initial", 0) or 0)
+
+    transactions = load_transactions()
+    if transactions.empty:
+        return initial
+
+    # Settlement_Out 扣 Back Up
+    settlement_out = transactions[
+        transactions["Type"] == TYPE_SETTLEMENT_OUT
+    ]["Amount"].sum()
+
+    # Transfer to Back Up
+    transfer_in = transactions[
+        (transactions["Type"] == TYPE_TRANSFER) &
+        (transactions["Target_Account"] == ACCOUNT_BACKUP)
+    ]["Amount"].sum()
+
+    # Transfer from Back Up
+    transfer_out = transactions[
+        (transactions["Type"] == TYPE_TRANSFER) &
+        (transactions["Account"] == ACCOUNT_BACKUP)
+    ]["Amount"].sum()
+
+    return float(initial - settlement_out + transfer_in - transfer_out)
+
+
+def get_free_fund_balance() -> float:
+    """
+    計算 Free Fund 餘額
+
+    公式：
+    Config['Free_Fund_Initial']
+    + sum(Settlement_In)
+    + sum(Transfer to Free_Fund)
+    - sum(Transfer from Free_Fund)
+    """
+    config = load_config()
+    initial = float(config.get("Free_Fund_Initial", 0) or 0)
+
+    transactions = load_transactions()
+    if transactions.empty:
+        return initial
+
+    # Settlement_In 進 Free Fund
+    settlement_in = transactions[
+        transactions["Type"] == TYPE_SETTLEMENT_IN
+    ]["Amount"].sum()
+
+    # Transfer to Free Fund
+    transfer_in = transactions[
+        (transactions["Type"] == TYPE_TRANSFER) &
+        (transactions["Target_Account"] == ACCOUNT_FREEFUND)
+    ]["Amount"].sum()
+
+    # Transfer from Free Fund
+    transfer_out = transactions[
+        (transactions["Type"] == TYPE_TRANSFER) &
+        (transactions["Account"] == ACCOUNT_FREEFUND)
+    ]["Amount"].sum()
+
+    return float(initial + settlement_in + transfer_in - transfer_out)
+
+
+# =============================================================================
+# 結算函式
+# =============================================================================
+
+def update_period_status(period_id: str, status: str, settled_at: str = "") -> bool:
+    """更新週期狀態"""
+    try:
+        sheet = get_spreadsheet().worksheet(SHEET_PERIOD)
+        records = sheet.get_all_records()
+
+        for idx, record in enumerate(records):
+            if record.get("Period_ID") == period_id:
+                row_num = idx + 2  # 標題列 + 1-indexed
+
+                # 找到 Status 欄位位置
+                headers = sheet.row_values(1)
+                status_col = headers.index("Status") + 1
+                sheet.update_cell(row_num, status_col, status)
+
+                # 更新 Settled_At
+                if settled_at and "Settled_At" in headers:
+                    settled_col = headers.index("Settled_At") + 1
+                    sheet.update_cell(row_num, settled_col, settled_at)
+
+                st.cache_data.clear()
+                return True
+        return False
+    except Exception as e:
+        st.error(f"更新週期狀態失敗：{e}")
+        return False
+
+
+def settle_period(period_id: str) -> dict:
+    """
+    結算週期
+
+    Actions:
+    1. 計算：Living_Budget - Total_Expense = Net_Result
+    2. If Net > 0: 產生 Settlement_In 交易（進 Free_Fund）
+    3. If Net < 0: 產生 Settlement_Out 交易（扣 Back_Up）
+    4. 寫入 Settlement_Log
+    5. 更新 Period status 為 'Settled'
+
+    Returns:
+        {
+            'success': bool,
+            'net_result': float,  # 正=結餘, 負=超支
+            'settlement_id': str,
+            'message': str
+        }
+    """
+    try:
+        period = get_period_by_id(period_id)
+        if period is None:
+            return {'success': False, 'net_result': 0, 'settlement_id': '', 'message': '找不到週期'}
+
+        if period["Status"] == PERIOD_SETTLED:
+            return {'success': False, 'net_result': 0, 'settlement_id': '', 'message': '此週期已結算'}
+
+        # 計算結果
+        budget = float(period["Living_Budget"]) if period["Living_Budget"] else 0.0
+        transactions = load_transactions()
+
+        if transactions.empty:
+            total_expense = 0.0
+        else:
+            expenses = transactions[
+                (transactions["Type"] == TYPE_EXPENSE) &
+                (transactions["Account"] == ACCOUNT_LIVING) &
+                (transactions["Period_ID"] == period_id)
+            ]
+            total_expense = float(expenses["Amount"].sum()) if not expenses.empty else 0.0
+
+        net_result = budget - total_expense
+
+        # 產生結算交易
+        now = get_taiwan_now()
+        settlement_id = f"STL{now.strftime('%Y%m%d%H%M%S')}"
+
+        if net_result > 0:
+            # 結餘進 Free Fund
+            add_transaction(
+                trans_type=TYPE_SETTLEMENT_IN,
+                amount=net_result,
+                account=ACCOUNT_FREEFUND,
+                note="週期結算結餘",
+                ref=period_id
+            )
+            impact_account = ACCOUNT_FREEFUND
+        elif net_result < 0:
+            # 超支扣 Back Up
+            add_transaction(
+                trans_type=TYPE_SETTLEMENT_OUT,
+                amount=abs(net_result),
+                account=ACCOUNT_BACKUP,
+                note="週期結算超支",
+                ref=period_id
+            )
+            impact_account = ACCOUNT_BACKUP
+        else:
+            impact_account = ""
+
+        # 寫入 Settlement_Log
+        sheet = get_spreadsheet().worksheet(SHEET_SETTLEMENT_LOG)
+        sheet.append_row([
+            settlement_id,
+            period_id,
+            budget,
+            total_expense,
+            net_result,
+            impact_account,
+            now.strftime("%Y-%m-%d %H:%M:%S")
+        ], value_input_option="USER_ENTERED")
+
+        # 更新 Period 狀態
+        update_period_status(period_id, PERIOD_SETTLED, now.strftime("%Y-%m-%d %H:%M:%S"))
+
+        st.cache_data.clear()
+
+        return {
+            'success': True,
+            'net_result': net_result,
+            'settlement_id': settlement_id,
+            'message': f"結算完成：{'結餘' if net_result >= 0 else '超支'} ${abs(net_result):,.0f}"
+        }
+
+    except Exception as e:
+        return {'success': False, 'net_result': 0, 'settlement_id': '', 'message': f'結算失敗：{str(e)}'}
+
+
 def get_wallet_balance() -> float:
     """
     計算錢包餘額
@@ -877,22 +1207,104 @@ def tab_expense():
     """Tab 1: 記帳"""
     st.header("記帳")
 
-    # 錢包餘額顯示
-    wallet_balance = get_wallet_balance()
-    st.metric("💰 錢包餘額", f"${wallet_balance:,.0f}")
+    # 載入設定
+    config = load_config()
+
+    # 狀態總覽區域
+    period = get_active_period()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("💰 錢包", f"${get_wallet_balance():,.0f}")
+    with col2:
+        backup_balance = get_backup_balance()
+        backup_limit = float(config.get("Back_Up_Limit", 150000) or 150000)
+        backup_pct = (backup_balance / backup_limit * 100) if backup_limit > 0 else 0
+        st.metric("🛡️ Back Up", f"${backup_balance:,.0f}")
+        if backup_balance < 0:
+            st.error(f"⚠️ 已透支！")
+        else:
+            st.progress(min(backup_pct / 100, 1.0))
+            st.caption(f"{backup_pct:.0f}% / ${backup_limit:,.0f}")
+
+    col3, col4 = st.columns(2)
+    with col3:
+        st.metric("✨ Free Fund", f"${get_free_fund_balance():,.0f}")
+    with col4:
+        if period is not None:
+            days_left = get_period_days_left(period)
+            end_date = period["End_Date"]
+            if isinstance(end_date, str):
+                end_date = pd.to_datetime(end_date).date()
+            elif hasattr(end_date, 'date'):
+                end_date = end_date.date()
+
+            if is_period_overdue(period):
+                st.warning(f"⚠️ 週期已結束，待結算")
+            else:
+                st.metric("📅 週期剩餘", f"{days_left} 天")
+                st.caption(f"至 {end_date.strftime('%m/%d')}")
+        else:
+            st.info("📅 無進行中週期")
 
     st.divider()
 
-    # 顯示當前週期資訊
-    period = get_active_period()
-    if period is not None:
-        start, end = get_current_period_dates()
-        days_left = get_days_left_in_period()
+    # 今日可用額度（大字顯示）
+    if period is not None and not is_period_overdue(period):
+        period_id = period["Period_ID"]
+        daily = get_daily_available(period_id)
+        remaining = get_living_remaining(period_id)
+        days_left = get_period_days_left(period)
 
-        st.info(f"**本期：** {start} ~ {end} （剩餘 {days_left} 天）")
-        st.metric("Living 預算", f"${float(period['Living_Budget']):,.0f}")
+        st.markdown("### 今日可用額度")
+        if daily >= 0:
+            st.markdown(f"## ${daily:,.0f}")
+        else:
+            st.markdown(f"## :red[${daily:,.0f}]")
+            st.error("Living 已超支！")
+        st.caption(f"Living 剩餘 ${remaining:,.0f} ÷ {days_left} 天")
+    elif period is not None and is_period_overdue(period):
+        st.warning("⚠️ 週期已結束，請到「策略」頁面進行結算")
     else:
-        st.warning("尚未建立預算週期，請到「策略」頁面建立")
+        st.warning("請先到「策略」頁面啟動週期儀式")
+
+    st.divider()
+
+    # 科目進度區域
+    st.markdown("### 📊 各科目本期狀態")
+
+    if period is not None:
+        period_id = period["Period_ID"]
+        categories = load_categories()
+
+        if not categories.empty and "Status" in categories.columns:
+            active_cats = categories[categories["Status"] == "Active"]
+
+            if active_cats.empty:
+                st.info("尚無啟用中的科目")
+            else:
+                for _, cat in active_cats.iterrows():
+                    cat_id = cat["Category_ID"]
+                    cat_name = cat["Name"]
+                    budget = float(cat["Budget"]) if cat.get("Budget") else 0
+
+                    spent = get_category_spent(cat_id, period_id)
+
+                    if budget > 0:
+                        progress = spent / budget
+                        warning = " ⚠️" if progress > 0.9 else ""
+
+                        st.write(f"**{cat_name}**{warning}")
+                        st.progress(min(progress, 1.0))
+                        st.caption(f"${spent:,.0f} / ${budget:,.0f} ({progress*100:.0f}%)")
+                    else:
+                        st.write(f"**{cat_name}** — 未設定預算")
+                        if spent > 0:
+                            st.caption(f"已花：${spent:,.0f}")
+        else:
+            st.info("尚無科目資料")
+    else:
+        st.info("啟動週期後顯示科目進度")
 
     st.divider()
 
@@ -902,14 +1314,28 @@ def tab_expense():
 
     st.divider()
 
+    # 本期消費紀錄
     st.markdown("### 本期消費紀錄")
     transactions = load_transactions()
-    if not transactions.empty:
-        expenses = transactions[transactions["Type"] == TYPE_EXPENSE]
+    if not transactions.empty and period is not None:
+        period_id = period["Period_ID"]
+        expenses = transactions[
+            (transactions["Type"] == TYPE_EXPENSE) &
+            (transactions["Period_ID"] == period_id)
+        ]
         if not expenses.empty:
-            st.dataframe(expenses.head(10), use_container_width=True)
+            # 按日期倒序排列
+            expenses_sorted = expenses.sort_values("Date", ascending=False)
+            st.dataframe(expenses_sorted.head(10), use_container_width=True)
         else:
             st.info("本期尚無消費紀錄")
+    elif not transactions.empty:
+        expenses = transactions[transactions["Type"] == TYPE_EXPENSE]
+        if not expenses.empty:
+            expenses_sorted = expenses.sort_values("Date", ascending=False)
+            st.dataframe(expenses_sorted.head(10), use_container_width=True)
+        else:
+            st.info("尚無消費紀錄")
     else:
         st.info("尚無交易記錄")
 
@@ -969,16 +1395,63 @@ def tab_strategy():
 
     st.divider()
 
-    # 週期管理
-    st.markdown("### 週期管理")
+    # 週期狀態
+    st.markdown("### 💫 週期狀態")
+
     period = get_active_period()
 
     if period is not None:
-        start, end = get_current_period_dates()
-        st.success(f"當前週期：{start} ~ {end}")
-        st.metric("Living 預算", f"${float(period['Living_Budget']):,.0f}")
+        period_id = period["Period_ID"]
+        start_date = period["Start_Date"]
+        end_date = period["End_Date"]
+
+        # 格式化日期
+        if isinstance(start_date, str):
+            start_date = pd.to_datetime(start_date).date()
+        elif hasattr(start_date, 'date'):
+            start_date = start_date.date()
+
+        if isinstance(end_date, str):
+            end_date = pd.to_datetime(end_date).date()
+        elif hasattr(end_date, 'date'):
+            end_date = end_date.date()
+
+        if is_period_overdue(period):
+            st.error(f"⚠️ 週期已結束，待結算")
+            st.write(f"週期：{start_date.strftime('%m/%d')} ~ {end_date.strftime('%m/%d')}")
+
+            # 結算按鈕
+            if st.button("進行結算", type="primary", key="settle_btn"):
+                result = settle_period(period_id)
+                if result['success']:
+                    st.session_state["show_toast"] = result['message']
+                    st.rerun()
+                else:
+                    st.error(result['message'])
+        else:
+            days_left = get_period_days_left(period)
+            st.success(f"✓ 進行中")
+            st.write(f"週期：{start_date.strftime('%m/%d')} ~ {end_date.strftime('%m/%d')}（剩 {days_left} 天）")
+
+        # 當期總覽
+        with st.expander("📊 當期總覽"):
+            budget = float(period["Living_Budget"]) if period["Living_Budget"] else 0
+            remaining = get_living_remaining(period_id)
+            spent = budget - remaining
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Living 預算", f"${budget:,.0f}")
+            with col2:
+                st.metric("Living 已花", f"${spent:,.0f}")
+            with col3:
+                if remaining >= 0:
+                    st.metric("Living 剩餘", f"${remaining:,.0f}")
+                else:
+                    st.metric("Living 剩餘", f"${remaining:,.0f}", delta=f"超支 ${abs(remaining):,.0f}", delta_color="inverse")
+
     else:
-        st.warning("尚未建立週期")
+        st.info("無進行中週期")
 
         # 簡易建立週期表單
         with st.expander("建立新週期"):
