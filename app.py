@@ -1090,6 +1090,8 @@ def render_quick_expense_form():
 
                 if st.button(cat_name, key=f"quick_{cat_id}", type=button_type, use_container_width=True):
                     st.session_state["selected_category_id"] = cat_id
+                    # 同時更新下拉選單的值
+                    st.session_state["category_select"] = cat_name
                     st.rerun()
 
         st.divider()
