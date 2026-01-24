@@ -374,6 +374,43 @@ def get_days_left_in_period() -> int:
     return max(days_left, 1)
 
 
+def parse_amount(text: str) -> tuple[bool, float]:
+    """
+    解析金額輸入
+    Returns: (是否有效, 金額)
+    """
+    if not text or not text.strip():
+        return False, 0
+    try:
+        # 移除千分位逗號
+        cleaned = text.replace(",", "").strip()
+        amount = float(cleaned)
+        return amount > 0, amount
+    except ValueError:
+        return False, 0
+
+
+def get_daily_available() -> float:
+    """計算今日可用額度"""
+    days_left = get_days_left_in_period()
+    categories = load_categories()
+    df = get_period_transactions()
+
+    if not categories.empty and "Budget" in categories.columns:
+        total_budget = categories["Budget"].sum()
+    else:
+        total_budget = 0
+
+    if not df.empty:
+        total_expense = df[df["Type"] == TYPE_EXPENSE]["Amount"].sum()
+    else:
+        total_expense = 0
+
+    living_remaining = total_budget - total_expense
+    daily_available = living_remaining / days_left if days_left > 0 else 0
+    return daily_available
+
+
 def get_period_transactions() -> pd.DataFrame:
     """取得本期的交易記錄"""
     period_start, period_end = get_current_period()
@@ -735,7 +772,7 @@ def execute_transfer(from_account: str, to_account: str, amount: float, note: st
 def dialog_add_goal():
     """新增儲蓄目標 Dialog"""
     name = st.text_input("目標名稱 *")
-    target_amount = st.number_input("目標金額 *", min_value=0, step=1000, value=0)
+    target_text = st.text_input("目標金額 *", placeholder="輸入金額")
     deadline = st.date_input("截止日期（選填，有填 = Hard 目標）", value=None)
 
     col1, col2 = st.columns(2)
@@ -746,13 +783,15 @@ def dialog_add_goal():
         if st.button("建立目標", type="primary", use_container_width=True):
             if not name:
                 st.error("請輸入目標名稱")
-            elif target_amount <= 0:
-                st.error("請輸入有效金額")
             else:
-                deadline_str = deadline.strftime("%Y-%m-%d") if deadline else ""
-                if add_saving_goal(name, target_amount, deadline_str):
-                    st.toast(f"已建立目標：{name}")
-                    st.rerun()
+                is_valid, target_amount = parse_amount(target_text)
+                if not is_valid:
+                    st.error("請輸入有效金額")
+                else:
+                    deadline_str = deadline.strftime("%Y-%m-%d") if deadline else ""
+                    if add_saving_goal(name, target_amount, deadline_str):
+                        st.toast(f"已建立目標：{name}")
+                        st.rerun()
 
 
 @st.dialog("完成儲蓄目標")
@@ -762,19 +801,20 @@ def dialog_complete_goal(goal_id: str, goal_name: str, accumulated: float):
     st.markdown(f"**累積金額：** ${accumulated:,.0f}")
     st.divider()
 
-    actual_expense = st.number_input(
+    expense_text = st.text_input(
         "實際支出金額 *",
-        min_value=0,
-        step=100,
-        value=int(accumulated)
+        value=str(int(accumulated)),
+        key="complete_amount"
     )
 
-    # 計算差額
-    difference = accumulated - actual_expense
-    if difference > 0:
-        st.success(f"差額 ${difference:,.0f} 將進入自由支配金")
-    elif difference < 0:
-        st.warning(f"超出累積 ${-difference:,.0f}，不會產生自由支配金")
+    # 計算差額（即時顯示）
+    is_valid, actual_expense = parse_amount(expense_text)
+    if is_valid:
+        difference = accumulated - actual_expense
+        if difference > 0:
+            st.success(f"差額 ${difference:,.0f} 將進入自由支配金")
+        elif difference < 0:
+            st.warning(f"超出累積 ${-difference:,.0f}，不會產生自由支配金")
 
     note = st.text_input("備註（選填）")
 
@@ -784,7 +824,10 @@ def dialog_complete_goal(goal_id: str, goal_name: str, accumulated: float):
             st.rerun()
     with col2:
         if st.button("確認完成", type="primary", use_container_width=True):
-            if complete_saving_goal(goal_id, actual_expense, note):
+            is_valid, actual_expense = parse_amount(expense_text)
+            if not is_valid:
+                st.error("請輸入有效金額")
+            elif complete_saving_goal(goal_id, actual_expense, note):
                 st.toast(f"已完成目標：{goal_name}")
                 st.rerun()
 
@@ -878,7 +921,7 @@ def dialog_transfer():
     )
 
     # 金額
-    amount = st.number_input("金額", min_value=0, step=100, value=0, key="transfer_amount")
+    amount_text = st.text_input("金額", key="transfer_amount", placeholder="輸入金額")
 
     # 備註
     note = st.text_input("備註（選填）", key="transfer_note")
@@ -903,7 +946,8 @@ def dialog_transfer():
             st.rerun()
     with col2:
         if st.button("確認轉帳", type="primary", use_container_width=True, key="transfer_confirm"):
-            if amount <= 0:
+            is_valid, amount = parse_amount(amount_text)
+            if not is_valid:
                 st.error("請輸入有效金額")
             else:
                 if execute_transfer(from_account, to_account, amount, note):
@@ -920,13 +964,12 @@ def dialog_investing_confirm():
     st.markdown(f"**本月投資目標：** ${monthly_target:,.0f}")
     st.divider()
 
-    # 實際投資金額
-    actual_amount = st.number_input(
+    # 實際投資金額（text_input，預設帶入目標值）
+    amount_text = st.text_input(
         "實際投資金額",
-        min_value=0,
-        step=1000,
-        value=int(monthly_target),
-        help="可填 $0，若本月有特殊狀況"
+        value=str(int(monthly_target)),
+        key="invest_amount",
+        help="可填 0，若本月有特殊狀況"
     )
 
     # 投資日期
@@ -947,17 +990,24 @@ def dialog_investing_confirm():
             st.rerun()
     with col2:
         if st.button("確認投資", type="primary", use_container_width=True):
-            # 寫入 Investing_Confirm 交易
-            success = add_transaction(
-                trans_type=TYPE_INVESTING_CONFIRM,
-                amount=float(actual_amount),
-                account=ACCOUNT_INVESTING,
-                item="本月投資確認",
-                note=note
-            )
-            if success:
-                st.session_state["show_toast"] = f"已確認投資 ${actual_amount:,.0f}"
-                st.rerun()
+            # 驗證金額（允許 0）
+            try:
+                amount = float(amount_text.replace(",", "").strip()) if amount_text.strip() else 0
+                if amount < 0:
+                    st.error("金額不能為負數")
+                else:
+                    success = add_transaction(
+                        trans_type=TYPE_INVESTING_CONFIRM,
+                        amount=amount,
+                        account=ACCOUNT_INVESTING,
+                        item="本月投資確認",
+                        note=note
+                    )
+                    if success:
+                        st.session_state["show_toast"] = f"已確認投資 ${amount:,.0f}"
+                        st.rerun()
+            except ValueError:
+                st.error("請輸入有效金額")
 
 
 @st.dialog("常用科目設定")
@@ -969,7 +1019,7 @@ def dialog_quick_access_settings():
         st.warning("尚無科目資料")
         return
 
-    st.markdown("選擇最多 **4 個**常用科目：")
+    st.markdown("選擇最多 **6 個**常用科目：")
     st.caption("這些科目會顯示為快捷按鈕")
 
     st.divider()
@@ -992,11 +1042,11 @@ def dialog_quick_access_settings():
             selected.append(cat_id)
 
     # 檢查數量
-    if len(selected) > 4:
-        st.error(f"已選擇 {len(selected)} 個，最多只能選 4 個")
+    if len(selected) > 6:
+        st.error(f"已選擇 {len(selected)} 個，最多只能選 6 個")
         can_save = False
     else:
-        st.caption(f"已選擇 {len(selected)} / 4 個")
+        st.caption(f"已選擇 {len(selected)} / 6 個")
         can_save = True
 
     st.divider()
@@ -1039,127 +1089,162 @@ def update_quick_access(selected_ids: list) -> bool:
         return False
 
 
-def render_quick_expense_form():
-    """快速記帳表單"""
+@st.dialog("快速記帳")
+def dialog_quick_expense(category_id: str, category_name: str):
+    """快捷科目記帳 Dialog"""
 
-    # 標題和設定按鈕
-    col_title, col_settings = st.columns([4, 1])
-    with col_title:
-        st.subheader("快速記帳")
-    with col_settings:
-        if st.button("⚙️", help="設定常用科目"):
-            dialog_quick_access_settings()
+    # 顯示科目名稱和今日可用
+    st.markdown(f"### {category_name}")
 
-    # 載入科目和子類
-    categories = load_categories()
+    # 計算今日可用額度
+    daily_available = get_daily_available()
+    st.markdown(f"💰 **今日可用：${daily_available:,.0f}**")
+
+    st.divider()
+
+    # 子類選擇
     sub_tags = load_sub_tags()
+    if not sub_tags.empty and "Category_ID" in sub_tags.columns:
+        category_sub_tags = sub_tags[sub_tags["Category_ID"] == category_id]
+        sub_tag_list = category_sub_tags["Name"].tolist() if "Name" in category_sub_tags.columns else []
+    else:
+        sub_tag_list = []
 
-    if categories.empty:
-        st.warning("尚未設定科目，請先到 Google Sheets 設定 Category")
-        return
-
-    # 科目選擇
-    category_list = categories["Name"].tolist() if "Name" in categories.columns else []
-    if not category_list:
-        st.warning("Category Sheet 需要 Name 欄位")
-        return
-
-    # ===== 快捷按鈕區 =====
-    quick_access_cats = categories[categories["Is_Quick_Access"].apply(
-        lambda x: str(x).upper() == "TRUE" if pd.notna(x) else False
-    )] if "Is_Quick_Access" in categories.columns else pd.DataFrame()
-
-    # 初始化選中的科目
-    if "selected_category_id" not in st.session_state:
-        st.session_state["selected_category_id"] = None
-
-    if not quick_access_cats.empty:
-        st.markdown("**常用科目：**")
-        cols = st.columns(min(len(quick_access_cats), 4))
-
-        for i, (_, cat) in enumerate(quick_access_cats.iterrows()):
-            if i >= 4:
-                break
-            with cols[i]:
-                cat_id = cat["Category_ID"]
-                cat_name = cat["Name"]
-
-                # 檢查是否被選中
-                is_selected = st.session_state.get("selected_category_id") == cat_id
-                button_type = "primary" if is_selected else "secondary"
-
-                if st.button(cat_name, key=f"quick_{cat_id}", type=button_type, use_container_width=True):
-                    st.session_state["selected_category_id"] = cat_id
-                    # 同時更新下拉選單的值
-                    st.session_state["category_select"] = cat_name
-                    st.rerun()
-
-        st.divider()
-
-    # ========== 科目和子類放在 form 外面 ==========
-    col1, col2 = st.columns(2)
-
-    with col1:
-        # 如果有快捷選中的，設為預設
-        default_index = 0
-        if st.session_state.get("selected_category_id"):
-            selected_cat = categories[categories["Category_ID"] == st.session_state["selected_category_id"]]
-            if not selected_cat.empty:
-                cat_name = selected_cat.iloc[0]["Name"]
-                if cat_name in category_list:
-                    default_index = category_list.index(cat_name)
-
-        selected_category = st.selectbox("科目", category_list, index=default_index, key="category_select")
-
-    with col2:
-        # 取得選中科目的 Category_ID
-        selected_cat_row = categories[categories["Name"] == selected_category]
-        if not selected_cat_row.empty:
-            selected_cat_id = selected_cat_row.iloc[0]["Category_ID"]
-        else:
-            selected_cat_id = None
-
-        # 用 Category_ID 過濾子類
-        if not sub_tags.empty and "Category_ID" in sub_tags.columns and selected_cat_id:
-            category_sub_tags = sub_tags[sub_tags["Category_ID"] == selected_cat_id]
-            sub_tag_list = category_sub_tags["Name"].tolist() if "Name" in category_sub_tags.columns else []
-        else:
-            sub_tag_list = []
-
-        # 子類選擇
-        if sub_tag_list:
-            selected_sub_tag = st.selectbox(
-                "子類",
-                ["（不選擇）"] + sub_tag_list,
-                key="sub_tag_select"
-            )
-            if selected_sub_tag == "（不選擇）":
-                selected_sub_tag = ""
-        else:
-            st.markdown("**子類**")
-            st.caption("無子類")
+    if sub_tag_list:
+        selected_sub_tag = st.selectbox(
+            "子類",
+            ["（不選擇）"] + sub_tag_list,
+            key="quick_sub_tag"
+        )
+        if selected_sub_tag == "（不選擇）":
             selected_sub_tag = ""
+    else:
+        selected_sub_tag = ""
 
-    # ========== 金額、備註、按鈕放在 form 內 ==========
-    with st.form("expense_form", clear_on_submit=True):
-        item = st.text_input("品項 *")
-        amount = st.number_input("金額", min_value=0, step=10, value=0)
-        note = st.text_input("備註（選填）")
+    # 金額（text_input，不預設 0）
+    amount_text = st.text_input("金額 *", key="quick_amount", placeholder="輸入金額")
 
-        submitted = st.form_submit_button("記錄支出", use_container_width=True)
+    # 品項（選填）
+    item = st.text_input("品項（選填）", key="quick_item")
 
-        if submitted:
-            if amount <= 0:
+    # 備註（選填）
+    note = st.text_input("備註（選填）", key="quick_note")
+
+    st.divider()
+
+    # 按鈕
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True):
+            st.rerun()
+    with col2:
+        if st.button("記錄支出", type="primary", use_container_width=True):
+            # 驗證金額
+            is_valid, amount = parse_amount(amount_text)
+            if not is_valid:
                 st.error("請輸入有效金額")
-            elif not item:
-                st.error("請輸入品項")
             else:
-                # 取得 Sub_Tag_ID（如果有選子類）
+                # 取得 Sub_Tag_ID
                 if selected_sub_tag:
                     sub_tag_row = sub_tags[sub_tags["Name"] == selected_sub_tag]
                     sub_tag_id = sub_tag_row.iloc[0]["Sub_Tag_ID"] if not sub_tag_row.empty else ""
                 else:
                     sub_tag_id = ""
+
+                # 若品項為空，用科目名稱代替
+                final_item = item if item else category_name
+
+                success = add_transaction(
+                    trans_type=TYPE_EXPENSE,
+                    amount=amount,
+                    account=ACCOUNT_LIVING,
+                    category_id=category_id,
+                    sub_tag_id=sub_tag_id,
+                    item=final_item,
+                    note=note
+                )
+                if success:
+                    st.session_state["show_toast"] = f"已記錄 {category_name} ${amount:,.0f}"
+                    st.rerun()
+
+
+@st.dialog("手動輸入")
+def dialog_manual_expense():
+    """手動選擇科目記帳 Dialog"""
+
+    # 計算今日可用額度
+    daily_available = get_daily_available()
+    st.markdown(f"💰 **今日可用：${daily_available:,.0f}**")
+
+    st.divider()
+
+    # 科目選擇
+    categories = load_categories()
+    if categories.empty:
+        st.warning("尚無科目資料")
+        return
+
+    category_list = categories["Name"].tolist() if "Name" in categories.columns else []
+    selected_category = st.selectbox("科目 *", category_list, key="manual_category")
+
+    # 取得選中科目的 Category_ID
+    selected_cat_row = categories[categories["Name"] == selected_category]
+    if not selected_cat_row.empty:
+        selected_cat_id = selected_cat_row.iloc[0]["Category_ID"]
+    else:
+        selected_cat_id = None
+
+    # 子類選擇
+    sub_tags = load_sub_tags()
+    if not sub_tags.empty and "Category_ID" in sub_tags.columns and selected_cat_id:
+        category_sub_tags = sub_tags[sub_tags["Category_ID"] == selected_cat_id]
+        sub_tag_list = category_sub_tags["Name"].tolist() if "Name" in category_sub_tags.columns else []
+    else:
+        sub_tag_list = []
+
+    if sub_tag_list:
+        selected_sub_tag = st.selectbox(
+            "子類",
+            ["（不選擇）"] + sub_tag_list,
+            key="manual_sub_tag"
+        )
+        if selected_sub_tag == "（不選擇）":
+            selected_sub_tag = ""
+    else:
+        selected_sub_tag = ""
+
+    # 金額（text_input，不預設 0）
+    amount_text = st.text_input("金額 *", key="manual_amount", placeholder="輸入金額")
+
+    # 品項（選填）
+    item = st.text_input("品項（選填）", key="manual_item")
+
+    # 備註（選填）
+    note = st.text_input("備註（選填）", key="manual_note")
+
+    st.divider()
+
+    # 按鈕
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True, key="manual_cancel"):
+            st.rerun()
+    with col2:
+        if st.button("記錄支出", type="primary", use_container_width=True, key="manual_submit"):
+            # 驗證金額
+            is_valid, amount = parse_amount(amount_text)
+            if not is_valid:
+                st.error("請輸入有效金額")
+            else:
+                # 取得 Sub_Tag_ID
+                if selected_sub_tag:
+                    sub_tag_row = sub_tags[sub_tags["Name"] == selected_sub_tag]
+                    sub_tag_id = sub_tag_row.iloc[0]["Sub_Tag_ID"] if not sub_tag_row.empty else ""
+                else:
+                    sub_tag_id = ""
+
+                # 若品項為空，用科目名稱代替
+                final_item = item if item else selected_category
 
                 success = add_transaction(
                     trans_type=TYPE_EXPENSE,
@@ -1167,12 +1252,64 @@ def render_quick_expense_form():
                     account=ACCOUNT_LIVING,
                     category_id=selected_cat_id,
                     sub_tag_id=sub_tag_id,
-                    item=item,
+                    item=final_item,
                     note=note
                 )
                 if success:
-                    st.toast(f"已記錄 {selected_category} ${amount}")
+                    st.session_state["show_toast"] = f"已記錄 {selected_category} ${amount:,.0f}"
                     st.rerun()
+
+
+def render_quick_expense_form():
+    """快速記帳區（按鈕 + Dialog 模式）"""
+
+    # 標題和設定按鈕
+    col_title, col_settings = st.columns([4, 1])
+    with col_title:
+        st.subheader("⚡ 快速記帳")
+    with col_settings:
+        if st.button("⚙️", help="設定常用科目"):
+            dialog_quick_access_settings()
+
+    # 載入科目
+    categories = load_categories()
+
+    if categories.empty:
+        st.warning("尚未設定科目，請先到 Google Sheets 設定 Category")
+        return
+
+    # ===== 快捷按鈕區（最多 6 個，兩行各 3 個）=====
+    quick_access_cats = categories[categories["Is_Quick_Access"].apply(
+        lambda x: str(x).upper() == "TRUE" if pd.notna(x) else False
+    )] if "Is_Quick_Access" in categories.columns else pd.DataFrame()
+
+    if not quick_access_cats.empty:
+        # 第一行（最多 3 個）
+        first_row = list(quick_access_cats.iterrows())[:3]
+        if first_row:
+            cols = st.columns(3)
+            for i, (_, cat) in enumerate(first_row):
+                with cols[i]:
+                    cat_id = cat["Category_ID"]
+                    cat_name = cat["Name"]
+                    if st.button(cat_name, key=f"quick_{cat_id}", use_container_width=True):
+                        dialog_quick_expense(cat_id, cat_name)
+
+        # 第二行（第 4-6 個）
+        second_row = list(quick_access_cats.iterrows())[3:6]
+        if second_row:
+            cols = st.columns(3)
+            for i, (_, cat) in enumerate(second_row):
+                with cols[i]:
+                    cat_id = cat["Category_ID"]
+                    cat_name = cat["Name"]
+                    if st.button(cat_name, key=f"quick_{cat_id}", use_container_width=True):
+                        dialog_quick_expense(cat_id, cat_name)
+
+    # ===== 手動輸入按鈕 =====
+    st.markdown("")  # 間距
+    if st.button("📝 手動輸入", use_container_width=True, type="secondary"):
+        dialog_manual_expense()
 
 
 def render_period_transactions():
