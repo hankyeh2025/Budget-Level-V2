@@ -526,6 +526,26 @@ def get_days_left_in_period() -> int:
     return max(days_left, 1)
 
 
+def parse_amount(value: str) -> float:
+    """
+    解析金額輸入，支援千分位逗號
+
+    Args:
+        value: 使用者輸入的金額字串
+
+    Returns:
+        float: 解析後的金額，解析失敗回傳 0
+    """
+    if not value:
+        return 0.0
+    try:
+        # 移除千分位逗號和空白
+        cleaned = str(value).replace(",", "").replace(" ", "").strip()
+        return float(cleaned)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 # =============================================================================
 # UI 元件 - Tab 1: 記帳
 # =============================================================================
