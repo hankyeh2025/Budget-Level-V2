@@ -479,6 +479,136 @@ def add_transaction(
         return False
 
 
+def update_bank_account(
+    bank_id: str,
+    name: str,
+    note: str,
+    status: str
+) -> bool:
+    """
+    更新銀行帳戶
+
+    Args:
+        bank_id: 帳戶 ID
+        name: 新名稱
+        note: 新備註
+        status: "Active" or "Inactive"
+
+    Returns:
+        bool: 是否成功
+    """
+    spreadsheet = get_spreadsheet()
+    if spreadsheet is None:
+        return False
+
+    try:
+        worksheet = spreadsheet.worksheet(SHEET_BANK_ACCOUNT)
+        all_data = worksheet.get_all_records()
+
+        # 找到該 Bank_ID 的 row
+        for idx, row in enumerate(all_data):
+            if row.get("Bank_ID") == bank_id:
+                row_number = idx + 2  # +2 因為 header 佔第 1 行，idx 從 0 開始
+
+                # 欄位順序：Bank_ID | Name | Note | Status
+                # 更新 Name (B), Note (C), Status (D)
+                worksheet.update(f"B{row_number}:D{row_number}", [[name, note, status]])
+
+                st.cache_data.clear()
+                return True
+
+        st.error(f"找不到帳戶：{bank_id}")
+        return False
+
+    except Exception as e:
+        st.error(f"更新銀行帳戶失敗: {e}")
+        return False
+
+
+def update_category(category_id: str, updates: dict) -> bool:
+    """
+    更新科目資料
+
+    Args:
+        category_id: 科目 ID
+        updates: dict with keys like 'Budget', 'Default_Bank_ID', 'Default_Payment_Method'
+
+    Returns:
+        bool: 是否成功
+    """
+    spreadsheet = get_spreadsheet()
+    if spreadsheet is None:
+        return False
+
+    try:
+        worksheet = spreadsheet.worksheet(SHEET_CATEGORY)
+        all_data = worksheet.get_all_records()
+        headers = worksheet.row_values(1)
+
+        # 找到該 Category_ID 的 row
+        for idx, row in enumerate(all_data):
+            if row.get("Category_ID") == category_id:
+                row_number = idx + 2
+
+                # 更新指定的欄位
+                for key, value in updates.items():
+                    if key in headers:
+                        col_number = headers.index(key) + 1
+                        worksheet.update_cell(row_number, col_number, value)
+
+                st.cache_data.clear()
+                return True
+
+        st.error(f"找不到科目：{category_id}")
+        return False
+
+    except Exception as e:
+        st.error(f"更新科目失敗: {e}")
+        return False
+
+
+def update_sub_tag(sub_tag_id: str, updates: dict) -> bool:
+    """
+    更新子類資料
+
+    Args:
+        sub_tag_id: 子類 ID
+        updates: dict with keys like 'Budget', 'Default_Bank_ID', 'Default_Payment_Method'
+
+    Returns:
+        bool: 是否成功
+    """
+    spreadsheet = get_spreadsheet()
+    if spreadsheet is None:
+        return False
+
+    try:
+        worksheet = spreadsheet.worksheet(SHEET_SUB_TAG)
+        all_data = worksheet.get_all_records()
+        headers = worksheet.row_values(1)
+
+        # 找到該 Sub_Tag_ID 的 row
+        for idx, row in enumerate(all_data):
+            if row.get("Sub_Tag_ID") == sub_tag_id:
+                row_number = idx + 2
+
+                # 更新指定的欄位
+                for key, value in updates.items():
+                    if key in headers:
+                        col_number = headers.index(key) + 1
+                        worksheet.update_cell(row_number, col_number, value)
+
+                st.cache_data.clear()
+                return True
+
+        st.error(f"找不到子類：{sub_tag_id}")
+        return False
+
+    except Exception as e:
+        st.error(f"更新子類失敗: {e}")
+        return False
+
+
 # =============================================================================
 # 工具函式
 # =============================================================================
@@ -562,6 +692,50 @@ def get_wallet_balance() -> float:
     adjustment = logs[logs["Type"] == WALLET_ADJUSTMENT]["Amount"].sum()
 
     return float(income - allocate_out + transfer_in + adjustment)
+
+
+def get_defaults_for_expense(category_id: str, sub_tag_id: str = "") -> dict:
+    """
+    取得記帳時的預設值
+
+    Priority:
+    1. Sub_Tag defaults (if sub_tag_id provided and has non-empty defaults)
+    2. Category defaults
+    3. Empty string (user must select)
+
+    Returns:
+        {
+            'bank_id': str,
+            'payment_method': str  # 'Credit' or 'Direct' or ''
+        }
+    """
+    categories = load_categories()
+    sub_tags = load_sub_tags()
+
+    result = {'bank_id': '', 'payment_method': ''}
+
+    # Get category defaults
+    if not categories.empty and 'Category_ID' in categories.columns:
+        cat = categories[categories['Category_ID'] == category_id]
+        if not cat.empty:
+            cat_row = cat.iloc[0]
+            # Handle edge case: columns might not exist
+            if 'Default_Bank_ID' in cat_row:
+                result['bank_id'] = str(cat_row.get('Default_Bank_ID', '') or '')
+            if 'Default_Payment_Method' in cat_row:
+                result['payment_method'] = str(cat_row.get('Default_Payment_Method', '') or '')
+
+    # Override with sub_tag defaults if available
+    if sub_tag_id and not sub_tags.empty and 'Sub_Tag_ID' in sub_tags.columns:
+        sub = sub_tags[sub_tags['Sub_Tag_ID'] == sub_tag_id]
+        if not sub.empty:
+            sub_row = sub.iloc[0]
+            if 'Default_Bank_ID' in sub_row and sub_row.get('Default_Bank_ID'):
+                result['bank_id'] = str(sub_row['Default_Bank_ID'])
+            if 'Default_Payment_Method' in sub_row and sub_row.get('Default_Payment_Method'):
+                result['payment_method'] = str(sub_row['Default_Payment_Method'])
+
+    return result
 
 
 # =============================================================================
@@ -652,6 +826,47 @@ def dialog_adjustment():
                     if add_wallet_log(WALLET_ADJUSTMENT, difference, note="手動校正"):
                         st.session_state["show_toast"] = "已校正"
                         st.rerun()
+
+
+@st.dialog("編輯銀行帳戶")
+def dialog_edit_bank_account(bank_id: str, current_name: str, current_note: str, current_status: str):
+    """編輯銀行帳戶 Dialog"""
+    # 名稱
+    new_name = st.text_input("帳戶名稱 *", value=current_name)
+
+    # 備註
+    new_note = st.text_input("備註", value=current_note)
+
+    # 狀態
+    status_options = ["Active", "Inactive"]
+    current_index = status_options.index(current_status) if current_status in status_options else 0
+    new_status = st.radio(
+        "狀態",
+        status_options,
+        index=current_index,
+        format_func=lambda x: "啟用中" if x == "Active" else "已停用",
+        horizontal=True
+    )
+
+    # 停用警告
+    if new_status == "Inactive" and current_status == "Active":
+        st.warning("停用後將無法在新交易中選擇此帳戶")
+
+    st.divider()
+
+    # 按鈕
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True, key="edit_bank_cancel"):
+            st.rerun()
+    with col2:
+        if st.button("儲存", type="primary", use_container_width=True, key="edit_bank_save"):
+            if not new_name.strip():
+                st.error("請輸入帳戶名稱")
+            else:
+                if update_bank_account(bank_id, new_name.strip(), new_note, new_status):
+                    st.session_state["show_toast"] = "已更新帳戶"
+                    st.rerun()
 
 
 # =============================================================================
@@ -784,23 +999,41 @@ def tab_strategy():
     st.divider()
 
     # 銀行帳戶管理
-    st.markdown("### 銀行帳戶")
+    st.markdown("### 🏦 銀行帳戶管理")
     bank_accounts = load_bank_accounts()
 
     if bank_accounts.empty:
         st.info("尚無銀行帳戶")
     else:
         for _, bank in bank_accounts.iterrows():
-            st.markdown(f"- **{bank['Name']}** ({bank['Bank_ID']})")
+            bank_id = bank["Bank_ID"]
+            bank_name = bank["Name"]
+            bank_note = str(bank.get("Note", "") or "")
+            bank_status = bank.get("Status", "Active")
+            is_active = bank_status == "Active"
 
-    with st.expander("新增銀行帳戶"):
-        bank_name = st.text_input("帳戶名稱")
-        bank_note = st.text_input("備註（選填）")
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                if is_active:
+                    display_text = f"**{bank_name}**"
+                    if bank_note:
+                        display_text += f"  {bank_note}"
+                    st.markdown(display_text)
+                else:
+                    st.markdown(f"~~{bank_name}~~ *(已停用)*")
+            with col2:
+                if st.button("編輯", key=f"edit_bank_{bank_id}", use_container_width=True):
+                    dialog_edit_bank_account(bank_id, bank_name, bank_note, bank_status)
 
-        if st.button("新增帳戶"):
-            if bank_name:
-                if add_bank_account(bank_name, bank_note):
-                    st.success(f"已新增帳戶：{bank_name}")
+    # 新增帳戶按鈕
+    with st.expander("+ 新增帳戶"):
+        bank_name_input = st.text_input("帳戶名稱", key="new_bank_name")
+        bank_note_input = st.text_input("備註（選填）", key="new_bank_note")
+
+        if st.button("新增帳戶", key="add_bank_btn"):
+            if bank_name_input:
+                if add_bank_account(bank_name_input, bank_note_input):
+                    st.session_state["show_toast"] = f"已新增帳戶：{bank_name_input}"
                     st.rerun()
             else:
                 st.error("請輸入帳戶名稱")
