@@ -546,13 +546,127 @@ def parse_amount(value: str) -> float:
         return 0.0
 
 
+def get_wallet_balance() -> float:
+    """
+    計算錢包餘額
+
+    公式：Income - Allocate_Out + Transfer_In + Adjustment
+    """
+    logs = load_wallet_log()
+    if logs.empty:
+        return 0.0
+
+    income = logs[logs["Type"] == WALLET_INCOME]["Amount"].sum()
+    allocate_out = logs[logs["Type"] == WALLET_ALLOCATE_OUT]["Amount"].sum()
+    transfer_in = logs[logs["Type"] == WALLET_TRANSFER_IN]["Amount"].sum()
+    adjustment = logs[logs["Type"] == WALLET_ADJUSTMENT]["Amount"].sum()
+
+    return float(income - allocate_out + transfer_in + adjustment)
+
+
+# =============================================================================
+# UI 元件 - Dialogs
+# =============================================================================
+
+@st.dialog("收入入帳")
+def dialog_income():
+    """收入入帳 Dialog"""
+    # 金額輸入
+    amount_text = st.text_input("金額 *", placeholder="輸入金額")
+
+    # 銀行帳戶選擇
+    bank_accounts = load_bank_accounts()
+    bank_options = ["（不指定）"]
+    bank_id_map = {"（不指定）": ""}
+
+    if not bank_accounts.empty:
+        active_banks = bank_accounts[bank_accounts["Status"] == "Active"]
+        for _, bank in active_banks.iterrows():
+            bank_options.append(bank["Name"])
+            bank_id_map[bank["Name"]] = bank["Bank_ID"]
+
+    selected_bank = st.selectbox("銀行帳戶", bank_options)
+    bank_id = bank_id_map.get(selected_bank, "")
+
+    # 備註
+    note = st.text_input("備註（選填）")
+
+    st.divider()
+
+    # 按鈕
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True):
+            st.rerun()
+    with col2:
+        if st.button("確認入帳", type="primary", use_container_width=True):
+            amount = parse_amount(amount_text)
+            if amount <= 0:
+                st.error("請輸入有效金額")
+            else:
+                if add_wallet_log(WALLET_INCOME, amount, bank_id, note):
+                    st.session_state["show_toast"] = f"已入帳 ${amount:,.0f}"
+                    st.rerun()
+
+
+@st.dialog("校正錢包")
+def dialog_adjustment():
+    """校正錢包 Dialog"""
+    # 顯示系統餘額
+    current_balance = get_wallet_balance()
+    st.markdown(f"**系統餘額：** ${current_balance:,.0f}")
+
+    st.divider()
+
+    # 實際餘額輸入
+    actual_text = st.text_input("目前實際餘額 *", placeholder="輸入實際餘額")
+
+    # 計算差額並預覽
+    actual = parse_amount(actual_text)
+    if actual_text:
+        difference = actual - current_balance
+        if difference > 0:
+            st.success(f"將調整 +${difference:,.0f}")
+        elif difference < 0:
+            st.warning(f"將調整 -${abs(difference):,.0f}")
+        else:
+            st.info("無需調整")
+
+    st.divider()
+
+    # 按鈕
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True, key="adj_cancel"):
+            st.rerun()
+    with col2:
+        if st.button("確認校正", type="primary", use_container_width=True, key="adj_confirm"):
+            actual = parse_amount(actual_text)
+            if not actual_text:
+                st.error("請輸入實際餘額")
+            else:
+                difference = actual - current_balance
+                if difference == 0:
+                    st.info("無需調整")
+                else:
+                    if add_wallet_log(WALLET_ADJUSTMENT, difference, note="手動校正"):
+                        st.session_state["show_toast"] = "已校正"
+                        st.rerun()
+
+
 # =============================================================================
 # UI 元件 - Tab 1: 記帳
 # =============================================================================
 
 def tab_expense():
-    """Tab 1: 記帳 (Placeholder)"""
+    """Tab 1: 記帳"""
     st.header("記帳")
+
+    # 錢包餘額顯示
+    wallet_balance = get_wallet_balance()
+    st.metric("💰 錢包餘額", f"${wallet_balance:,.0f}")
+
+    st.divider()
 
     # 顯示當前週期資訊
     period = get_active_period()
@@ -622,8 +736,23 @@ def tab_goals():
 # =============================================================================
 
 def tab_strategy():
-    """Tab 3: 策略 (Placeholder)"""
+    """Tab 3: 策略"""
     st.header("策略")
+
+    # 錢包操作
+    with st.expander("💰 錢包操作", expanded=True):
+        wallet_balance = get_wallet_balance()
+        st.markdown(f"**目前餘額：** ${wallet_balance:,.0f}")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("+ 收入入帳", use_container_width=True):
+                dialog_income()
+        with col2:
+            if st.button("校正錢包", use_container_width=True):
+                dialog_adjustment()
+
+    st.divider()
 
     # 週期管理
     st.markdown("### 週期管理")
