@@ -507,6 +507,25 @@ def check_investing_confirmed_this_period() -> bool:
     return not df[df["Type"] == TYPE_INVESTING_CONFIRM].empty
 
 
+def get_goal_period_allocation(goal_id: str) -> float:
+    """計算單一儲蓄目標在本期的框定金額（Saving_In）"""
+    period_start, period_end = get_current_period()
+    df = load_transactions()
+
+    if df.empty:
+        return 0
+
+    # 過濾本期的 Saving_In
+    mask = (
+        (df["Type"] == TYPE_SAVING_IN) &
+        (df["Goal_ID"] == goal_id) &
+        (df["Date"].dt.date >= period_start) &
+        (df["Date"].dt.date <= period_end)
+    )
+
+    return float(df[mask]["Amount"].sum())
+
+
 # =============================================================================
 # Phase 4: 結算相關函式
 # =============================================================================
@@ -892,9 +911,144 @@ def dialog_transfer():
                     st.rerun()
 
 
+@st.dialog("確認本月投資")
+def dialog_investing_confirm():
+    """投資確認 Dialog"""
+    config = load_config()
+    monthly_target = float(config.get("Investing_Monthly_Target", 10000))
+
+    st.markdown(f"**本月投資目標：** ${monthly_target:,.0f}")
+    st.divider()
+
+    # 實際投資金額
+    actual_amount = st.number_input(
+        "實際投資金額",
+        min_value=0,
+        step=1000,
+        value=int(monthly_target),
+        help="可填 $0，若本月有特殊狀況"
+    )
+
+    # 投資日期
+    invest_date = st.date_input(
+        "投資日期",
+        value=get_taiwan_today()
+    )
+
+    # 備註
+    note = st.text_input("備註（選填）")
+
+    st.divider()
+
+    # 按鈕
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True):
+            st.rerun()
+    with col2:
+        if st.button("確認投資", type="primary", use_container_width=True):
+            # 寫入 Investing_Confirm 交易
+            success = add_transaction(
+                trans_type=TYPE_INVESTING_CONFIRM,
+                amount=float(actual_amount),
+                account=ACCOUNT_INVESTING,
+                item="本月投資確認",
+                note=note
+            )
+            if success:
+                st.session_state["show_toast"] = f"已確認投資 ${actual_amount:,.0f}"
+                st.rerun()
+
+
+@st.dialog("常用科目設定")
+def dialog_quick_access_settings():
+    """常用科目設定 Dialog"""
+    categories = load_categories()
+
+    if categories.empty:
+        st.warning("尚無科目資料")
+        return
+
+    st.markdown("選擇最多 **4 個**常用科目：")
+    st.caption("這些科目會顯示為快捷按鈕")
+
+    st.divider()
+
+    # 取得目前的快捷設定
+    selected = []
+
+    for _, cat in categories.iterrows():
+        cat_id = cat["Category_ID"]
+        cat_name = cat["Name"]
+        is_quick = cat.get("Is_Quick_Access", False)
+
+        # 處理可能的字串 "TRUE"/"FALSE"
+        if isinstance(is_quick, str):
+            is_quick = is_quick.upper() == "TRUE"
+
+        checked = st.checkbox(cat_name, value=bool(is_quick), key=f"qa_{cat_id}")
+
+        if checked:
+            selected.append(cat_id)
+
+    # 檢查數量
+    if len(selected) > 4:
+        st.error(f"已選擇 {len(selected)} 個，最多只能選 4 個")
+        can_save = False
+    else:
+        st.caption(f"已選擇 {len(selected)} / 4 個")
+        can_save = True
+
+    st.divider()
+
+    # 按鈕
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True):
+            st.rerun()
+    with col2:
+        if st.button("儲存", type="primary", use_container_width=True, disabled=not can_save):
+            # 更新 Google Sheets
+            if update_quick_access(selected):
+                st.session_state["show_toast"] = "已更新常用科目"
+                st.rerun()
+
+
+def update_quick_access(selected_ids: list) -> bool:
+    """更新常用科目設定"""
+    spreadsheet = get_spreadsheet()
+    if spreadsheet is None:
+        return False
+
+    try:
+        worksheet = spreadsheet.worksheet(SHEET_CATEGORY)
+        all_data = worksheet.get_all_records()
+
+        # Is_Quick_Access 在第 5 欄 (E)
+        for idx, row in enumerate(all_data):
+            row_number = idx + 2  # header 佔第 1 行
+            cat_id = row.get("Category_ID", "")
+            new_value = "TRUE" if cat_id in selected_ids else "FALSE"
+            worksheet.update_cell(row_number, 5, new_value)
+
+        st.cache_data.clear()
+        return True
+
+    except Exception as e:
+        st.error(f"更新失敗: {e}")
+        return False
+
+
 def render_quick_expense_form():
     """快速記帳表單"""
-    st.subheader("快速記帳")
+
+    # 標題和設定按鈕
+    col_title, col_settings = st.columns([4, 1])
+    with col_title:
+        st.subheader("快速記帳")
+    with col_settings:
+        if st.button("⚙️", help="設定常用科目"):
+            dialog_quick_access_settings()
 
     # 載入科目和子類
     categories = load_categories()
@@ -910,11 +1064,50 @@ def render_quick_expense_form():
         st.warning("Category Sheet 需要 Name 欄位")
         return
 
+    # ===== 快捷按鈕區 =====
+    quick_access_cats = categories[categories["Is_Quick_Access"].apply(
+        lambda x: str(x).upper() == "TRUE" if pd.notna(x) else False
+    )] if "Is_Quick_Access" in categories.columns else pd.DataFrame()
+
+    # 初始化選中的科目
+    if "selected_category_id" not in st.session_state:
+        st.session_state["selected_category_id"] = None
+
+    if not quick_access_cats.empty:
+        st.markdown("**常用科目：**")
+        cols = st.columns(min(len(quick_access_cats), 4))
+
+        for i, (_, cat) in enumerate(quick_access_cats.iterrows()):
+            if i >= 4:
+                break
+            with cols[i]:
+                cat_id = cat["Category_ID"]
+                cat_name = cat["Name"]
+
+                # 檢查是否被選中
+                is_selected = st.session_state.get("selected_category_id") == cat_id
+                button_type = "primary" if is_selected else "secondary"
+
+                if st.button(cat_name, key=f"quick_{cat_id}", type=button_type, use_container_width=True):
+                    st.session_state["selected_category_id"] = cat_id
+                    st.rerun()
+
+        st.divider()
+
     # ========== 科目和子類放在 form 外面 ==========
     col1, col2 = st.columns(2)
 
     with col1:
-        selected_category = st.selectbox("科目", category_list, key="category_select")
+        # 如果有快捷選中的，設為預設
+        default_index = 0
+        if st.session_state.get("selected_category_id"):
+            selected_cat = categories[categories["Category_ID"] == st.session_state["selected_category_id"]]
+            if not selected_cat.empty:
+                cat_name = selected_cat.iloc[0]["Name"]
+                if cat_name in category_list:
+                    default_index = category_list.index(cat_name)
+
+        selected_category = st.selectbox("科目", category_list, index=default_index, key="category_select")
 
     with col2:
         # 取得選中科目的 Category_ID
@@ -1084,6 +1277,35 @@ def render_status_overview():
 
     st.divider()
 
+    # ===== 提醒區 =====
+    # 檢查是否有未結算的上期
+    prev_start, prev_end = get_previous_period()
+    is_settled = check_period_settled(prev_start)
+
+    # 檢查本期投資是否已確認
+    is_investing_confirmed = check_investing_confirmed_this_period()
+
+    has_alerts = (not is_settled) or (not is_investing_confirmed)
+
+    if has_alerts:
+        st.markdown("**📌 待處理事項**")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if not is_settled:
+                if st.button("⚠️ 上期未結算", use_container_width=True):
+                    # 導向 Tab 3（無法直接切換 Tab，改用提示）
+                    st.info("請到「🧭 策略」頁面進行結算")
+
+        with col2:
+            if not is_investing_confirmed:
+                monthly_target = float(config.get("Investing_Monthly_Target", 10000))
+                if st.button(f"📈 確認投資 (${monthly_target:,.0f})", use_container_width=True):
+                    dialog_investing_confirm()
+
+        st.divider()
+
     # 第二行：本期資訊
     st.markdown(f"**本期：{period_start.strftime('%m/%d')} ~ {period_end.strftime('%m/%d')}** （剩餘 {days_left} 天）")
 
@@ -1204,8 +1426,20 @@ def tab_goals():
                 # 計算即時累積（從交易記錄）
                 accumulated = get_goal_accumulated(goal_id)
 
+                # 計算本月框定
+                period_allocation = get_goal_period_allocation(goal_id)
+
+                # 判斷是否為灰色狀態（本月框定 $0）
+                is_inactive = period_allocation == 0
+
                 with st.container(border=True):
-                    st.markdown(f"#### {goal_name}")
+                    # 標題（灰色狀態加上提示）
+                    if is_inactive:
+                        st.markdown(f"#### {goal_name} 🔇")
+                        st.caption("本月未框定")
+                    else:
+                        st.markdown(f"#### {goal_name}")
+
                     st.markdown(f"## ${accumulated:,.0f}")
 
                     # 進度條
@@ -1219,6 +1453,12 @@ def tab_goals():
                     else:
                         info_text += " | 無截止日"
                     st.caption(info_text)
+
+                    # 本月框定顯示
+                    if period_allocation > 0:
+                        st.markdown(f"**本月框定：** +${period_allocation:,.0f}")
+                    else:
+                        st.markdown("**本月框定：** $0")
 
                     # 完成按鈕
                     if st.button("完成目標", key=f"complete_{goal_id}"):
