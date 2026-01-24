@@ -1069,6 +1069,536 @@ def get_defaults_for_expense(category_id: str, sub_tag_id: str = "") -> dict:
 
 
 # =============================================================================
+# 週期儀式 (Period Ritual)
+# =============================================================================
+
+def start_ritual():
+    """啟動週期儀式"""
+    st.session_state.ritual_active = True
+    st.session_state.ritual_step = 1
+    st.session_state.ritual_data = {}
+
+
+def end_ritual():
+    """結束週期儀式"""
+    st.session_state.ritual_active = False
+    st.session_state.ritual_step = 1
+    st.session_state.ritual_data = {}
+
+
+def render_ritual_step1():
+    """Step 1: 結算上期"""
+    st.markdown("### 💫 週期儀式 — Step 1/4")
+    st.markdown("#### 📍 結算上期")
+
+    period = get_active_period()
+
+    if period is None:
+        # 無進行中週期，直接跳到 Step 2
+        st.info("無進行中週期，跳過結算")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("取消儀式", use_container_width=True):
+                end_ritual()
+                st.rerun()
+        with col2:
+            if st.button("下一步 →", type="primary", use_container_width=True):
+                st.session_state.ritual_step = 2
+                st.rerun()
+        return
+
+    period_id = period["Period_ID"]
+    start_date = period["Start_Date"]
+    end_date = period["End_Date"]
+
+    # 格式化日期
+    if isinstance(start_date, str):
+        start_date = pd.to_datetime(start_date).date()
+    elif hasattr(start_date, 'date'):
+        start_date = start_date.date()
+
+    if isinstance(end_date, str):
+        end_date = pd.to_datetime(end_date).date()
+    elif hasattr(end_date, 'date'):
+        end_date = end_date.date()
+
+    st.write(f"**期間：** {start_date.strftime('%m/%d')} ~ {end_date.strftime('%m/%d')}")
+
+    # 提前結算警告
+    if not is_period_overdue(period):
+        days_left = get_period_days_left(period)
+        st.warning(f"⚠️ 目前週期尚未結束（剩餘 {days_left} 天），確定要提前結算嗎？")
+
+    # 顯示各科目結算明細
+    budget = float(period["Living_Budget"]) if period["Living_Budget"] else 0
+    categories = load_categories()
+
+    st.markdown("##### 各科目支出明細")
+
+    total_spent = 0
+    if not categories.empty and "Status" in categories.columns:
+        active_cats = categories[categories["Status"] == "Active"]
+        for _, cat in active_cats.iterrows():
+            cat_id = cat["Category_ID"]
+            cat_name = cat["Name"]
+            cat_budget = float(cat.get("Budget", 0) or 0)
+            spent = get_category_spent(cat_id, period_id)
+            total_spent += spent
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.write(cat_name)
+            with col2:
+                st.write(f"預算 ${cat_budget:,.0f}")
+            with col3:
+                st.write(f"支出 ${spent:,.0f}")
+
+    st.divider()
+
+    # 結算結果預覽
+    net_result = budget - total_spent
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Living 預算", f"${budget:,.0f}")
+    with col2:
+        st.metric("實際支出", f"${total_spent:,.0f}")
+
+    if net_result > 0:
+        st.success(f"✨ 結餘 ${net_result:,.0f} → Free Fund")
+    elif net_result < 0:
+        st.error(f"⚠️ 超支 ${abs(net_result):,.0f} → 扣 Back Up")
+    else:
+        st.info("收支平衡")
+
+    # 儲存結算資料供後續使用
+    st.session_state.ritual_data["previous_period_id"] = period_id
+    st.session_state.ritual_data["settlement_preview"] = {
+        "budget": budget,
+        "spent": total_spent,
+        "net_result": net_result
+    }
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消儀式", use_container_width=True):
+            end_ritual()
+            st.rerun()
+    with col2:
+        if st.button("確認結算，下一步 →", type="primary", use_container_width=True):
+            # 執行結算
+            result = settle_period(period_id)
+            if result["success"]:
+                st.session_state.ritual_data["settlement_result"] = result
+                st.session_state.ritual_step = 2
+                st.rerun()
+            else:
+                st.error(result["message"])
+
+
+def render_ritual_step2():
+    """Step 2: 設定新週期"""
+    st.markdown("### 💫 週期儀式 — Step 2/4")
+    st.markdown("#### 📍 設定新週期")
+
+    today = get_taiwan_today()
+
+    # 開始日期（固定為今天）
+    st.write(f"**開始日期：** {today.strftime('%Y-%m-%d')}（今天）")
+
+    # 結束日期
+    default_end = today + timedelta(days=30)
+
+    # 快捷按鈕
+    st.caption("快速選擇結束日期：")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("一個月後", use_container_width=True):
+            st.session_state.ritual_data["end_date"] = today + timedelta(days=30)
+            st.rerun()
+    with col2:
+        if st.button("兩週後", use_container_width=True):
+            st.session_state.ritual_data["end_date"] = today + timedelta(days=14)
+            st.rerun()
+    with col3:
+        if st.button("一週後", use_container_width=True):
+            st.session_state.ritual_data["end_date"] = today + timedelta(days=7)
+            st.rerun()
+
+    # 手動選擇
+    saved_end = st.session_state.ritual_data.get("end_date", default_end)
+    end_date = st.date_input("預計結束日期", value=saved_end, min_value=today + timedelta(days=1))
+    st.session_state.ritual_data["end_date"] = end_date
+    st.session_state.ritual_data["start_date"] = today
+
+    # 顯示週期長度
+    days_count = (end_date - today).days + 1
+    st.caption(f"週期長度：{days_count} 天")
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← 上一步", use_container_width=True):
+            st.session_state.ritual_step = 1
+            st.rerun()
+    with col2:
+        if st.button("下一步 →", type="primary", use_container_width=True):
+            st.session_state.ritual_step = 3
+            st.rerun()
+
+
+def render_ritual_step3():
+    """Step 3: 審視信封架構"""
+    st.markdown("### 💫 週期儀式 — Step 3/4")
+    st.markdown("#### 📍 審視信封架構")
+    st.caption("設定各科目的本期預算")
+
+    categories = load_categories()
+
+    if categories.empty:
+        st.warning("尚無科目，請先在設定中新增科目")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← 上一步", use_container_width=True):
+                st.session_state.ritual_step = 2
+                st.rerun()
+        with col2:
+            if st.button("跳過，下一步 →", use_container_width=True):
+                st.session_state.ritual_data["category_budgets"] = {}
+                st.session_state.ritual_data["living_budget"] = 0
+                st.session_state.ritual_step = 4
+                st.rerun()
+        return
+
+    active_cats = categories[categories["Status"] == "Active"] if "Status" in categories.columns else categories
+
+    if active_cats.empty:
+        st.warning("沒有啟用中的科目")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← 上一步", use_container_width=True):
+                st.session_state.ritual_step = 2
+                st.rerun()
+        with col2:
+            if st.button("跳過，下一步 →", use_container_width=True):
+                st.session_state.ritual_data["category_budgets"] = {}
+                st.session_state.ritual_data["living_budget"] = 0
+                st.session_state.ritual_step = 4
+                st.rerun()
+        return
+
+    # 初始化預算資料
+    if "category_budgets" not in st.session_state.ritual_data:
+        st.session_state.ritual_data["category_budgets"] = {}
+        for _, cat in active_cats.iterrows():
+            cat_id = cat["Category_ID"]
+            default_budget = float(cat.get("Budget", 0) or 0)
+            st.session_state.ritual_data["category_budgets"][cat_id] = default_budget
+
+    # 顯示各科目預算輸入
+    total_living_budget = 0
+
+    for _, cat in active_cats.iterrows():
+        cat_id = cat["Category_ID"]
+        cat_name = cat["Name"]
+        current_budget = st.session_state.ritual_data["category_budgets"].get(cat_id, 0)
+
+        col1, col2 = st.columns([2, 3])
+        with col1:
+            st.write(f"**{cat_name}**")
+        with col2:
+            new_budget_text = st.text_input(
+                f"預算",
+                value=f"{current_budget:,.0f}" if current_budget > 0 else "",
+                key=f"budget_{cat_id}",
+                label_visibility="collapsed",
+                placeholder="輸入預算金額"
+            )
+            new_budget = parse_amount(new_budget_text)
+            st.session_state.ritual_data["category_budgets"][cat_id] = new_budget
+            total_living_budget += new_budget
+
+    st.divider()
+    st.markdown(f"### Living 預算合計：${total_living_budget:,.0f}")
+
+    # 儲存總預算
+    st.session_state.ritual_data["living_budget"] = total_living_budget
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← 上一步", use_container_width=True):
+            st.session_state.ritual_step = 2
+            st.rerun()
+    with col2:
+        if total_living_budget <= 0:
+            st.button("下一步 →", type="primary", use_container_width=True, disabled=True)
+            st.caption("請設定至少一個科目預算")
+        else:
+            if st.button("下一步 →", type="primary", use_container_width=True):
+                st.session_state.ritual_step = 4
+                st.rerun()
+
+
+def render_ritual_step4():
+    """Step 4: 分配資金"""
+    st.markdown("### 💫 週期儀式 — Step 4/4")
+    st.markdown("#### 📍 分配資金")
+
+    # 顯示目前餘額
+    wallet_balance = get_wallet_balance()
+    free_fund_balance = get_free_fund_balance()
+    backup_balance = get_backup_balance()
+
+    st.markdown("##### 目前帳戶餘額")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("💰 錢包", f"${wallet_balance:,.0f}")
+    with col2:
+        st.metric("✨ Free Fund", f"${free_fund_balance:,.0f}")
+    with col3:
+        st.metric("🛡️ Back Up", f"${backup_balance:,.0f}")
+
+    # 快速轉帳到錢包
+    with st.expander("💸 從其他帳戶轉到錢包"):
+        transfer_source = st.selectbox(
+            "來源",
+            ["Free Fund", "Back Up"],
+            key="transfer_source"
+        )
+        transfer_amount_text = st.text_input("金額", key="transfer_amount", placeholder="輸入轉帳金額")
+        transfer_amount = parse_amount(transfer_amount_text)
+
+        if st.button("轉帳到錢包", use_container_width=True):
+            if transfer_amount <= 0:
+                st.error("請輸入有效金額")
+            else:
+                # 寫入 Transfer 交易
+                source_account = ACCOUNT_FREEFUND if transfer_source == "Free Fund" else ACCOUNT_BACKUP
+                add_transaction(
+                    trans_type=TYPE_TRANSFER,
+                    amount=transfer_amount,
+                    account=source_account,
+                    target_account="Wallet",
+                    note="週期儀式轉帳"
+                )
+                # 寫入 Wallet_Log
+                add_wallet_log(
+                    WALLET_TRANSFER_IN,
+                    transfer_amount,
+                    note=f"從 {transfer_source} 轉入"
+                )
+                st.cache_data.clear()
+                st.session_state["show_toast"] = f"已從 {transfer_source} 轉入 ${transfer_amount:,.0f}"
+                st.rerun()
+
+    st.divider()
+
+    # Living 分配（= Step 3 設定的總預算）
+    living_budget = st.session_state.ritual_data.get("living_budget", 0)
+    st.markdown("##### Living 分配")
+    st.write(f"= Step 3 科目預算加總：**${living_budget:,.0f}**")
+
+    st.divider()
+
+    # Saving 分配（選填）
+    st.markdown("##### Saving 分配（選填）")
+
+    saving_goals = load_saving_goals()
+    saving_allocations = st.session_state.ritual_data.get("saving_allocations", {})
+    total_saving = 0
+
+    if not saving_goals.empty and "Status" in saving_goals.columns:
+        active_goals = saving_goals[saving_goals["Status"] == "Active"]
+        if not active_goals.empty:
+            for _, goal in active_goals.iterrows():
+                goal_id = goal["Goal_ID"] if "Goal_ID" in goal else goal.get("Saving_Goal_ID", "")
+                goal_name = goal["Name"]
+
+                col1, col2 = st.columns([2, 3])
+                with col1:
+                    st.write(goal_name)
+                with col2:
+                    default_alloc = saving_allocations.get(goal_id, 0)
+                    alloc_text = st.text_input(
+                        "分配",
+                        value=f"{default_alloc:,.0f}" if default_alloc > 0 else "",
+                        key=f"saving_{goal_id}",
+                        label_visibility="collapsed",
+                        placeholder="0"
+                    )
+                    alloc = parse_amount(alloc_text)
+                    saving_allocations[goal_id] = alloc
+                    total_saving += alloc
+        else:
+            st.caption("無進行中的儲蓄目標")
+    else:
+        st.caption("無儲蓄目標")
+
+    st.write(f"Saving 分配小計：${total_saving:,.0f}")
+
+    st.divider()
+
+    # Back Up 分配（選填）
+    st.markdown("##### Back Up 分配（選填）")
+    default_backup = st.session_state.ritual_data.get("backup_allocation", 0)
+    backup_alloc_text = st.text_input(
+        "Back Up 補血",
+        value=f"{default_backup:,.0f}" if default_backup > 0 else "",
+        key="backup_alloc",
+        placeholder="0"
+    )
+    backup_alloc = parse_amount(backup_alloc_text)
+
+    st.divider()
+
+    # 分配總覽
+    total_allocation = living_budget + total_saving + backup_alloc
+    # 重新獲取最新錢包餘額
+    wallet_balance = get_wallet_balance()
+    wallet_remaining = wallet_balance - total_allocation
+
+    st.markdown("### 分配總覽")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write(f"Living：${living_budget:,.0f}")
+        st.write(f"Saving：${total_saving:,.0f}")
+        st.write(f"Back Up：${backup_alloc:,.0f}")
+        st.markdown(f"**分配總計：${total_allocation:,.0f}**")
+    with col2:
+        st.write(f"錢包餘額：${wallet_balance:,.0f}")
+        if wallet_remaining >= 0:
+            st.success(f"錢包剩餘：${wallet_remaining:,.0f} ✓")
+        else:
+            st.error(f"錢包不足：${wallet_remaining:,.0f}")
+
+    # 儲存分配資料
+    st.session_state.ritual_data["saving_allocations"] = saving_allocations
+    st.session_state.ritual_data["backup_allocation"] = backup_alloc
+    st.session_state.ritual_data["total_allocation"] = total_allocation
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← 上一步", use_container_width=True):
+            st.session_state.ritual_step = 3
+            st.rerun()
+    with col2:
+        can_complete = wallet_remaining >= 0 and living_budget > 0
+        if not can_complete:
+            st.button("完成儀式 ✓", type="primary", use_container_width=True, disabled=True)
+            if wallet_remaining < 0:
+                st.caption("錢包餘額不足")
+            elif living_budget <= 0:
+                st.caption("請先設定 Living 預算")
+        else:
+            if st.button("完成儀式 ✓", type="primary", use_container_width=True):
+                complete_ritual()
+
+
+def complete_ritual():
+    """完成週期儀式，寫入所有資料"""
+    try:
+        data = st.session_state.ritual_data
+
+        # 1. 建立新 Period
+        start_date = data["start_date"]
+        end_date = data["end_date"]
+        living_budget = data["living_budget"]
+
+        period_id = add_period(start_date, end_date, living_budget)
+        if not period_id:
+            st.error("建立週期失敗")
+            return
+
+        # 2. 寫入 Wallet_Log - Living 分配
+        add_wallet_log(
+            WALLET_ALLOCATE_OUT,
+            living_budget,
+            note="Living 分配",
+            ref=period_id
+        )
+
+        # 3. 寫入 Wallet_Log 和 Transaction - Saving 分配
+        saving_allocations = data.get("saving_allocations", {})
+        for goal_id, amount in saving_allocations.items():
+            if amount > 0:
+                # Wallet_Log
+                add_wallet_log(
+                    WALLET_ALLOCATE_OUT,
+                    amount,
+                    note="Saving 分配",
+                    ref=goal_id
+                )
+                # Transaction (Saving_In)
+                add_transaction(
+                    trans_type=TYPE_SAVING_IN,
+                    amount=amount,
+                    account=ACCOUNT_SAVING,
+                    goal_id=goal_id,
+                    note="週期儀式分配",
+                    period_id=period_id
+                )
+
+        # 4. 寫入 Wallet_Log 和 Transaction - Back Up 分配
+        backup_alloc = data.get("backup_allocation", 0)
+        if backup_alloc > 0:
+            add_wallet_log(
+                WALLET_ALLOCATE_OUT,
+                backup_alloc,
+                note="Back Up 分配",
+                ref="Back_Up"
+            )
+            # 寫入 Transfer 交易記錄 Back Up 補血
+            add_transaction(
+                trans_type=TYPE_TRANSFER,
+                amount=backup_alloc,
+                account="Wallet",
+                target_account=ACCOUNT_BACKUP,
+                note="週期儀式 Back Up 補血",
+                period_id=period_id
+            )
+
+        # 5. 更新科目預算（如果有變更）
+        category_budgets = data.get("category_budgets", {})
+        for cat_id, budget in category_budgets.items():
+            update_category(cat_id, {"Budget": budget})
+
+        # 6. 清理並結束儀式
+        st.cache_data.clear()
+        st.session_state["show_toast"] = "✨ 週期儀式完成！新週期已開始"
+        end_ritual()
+        st.rerun()
+
+    except Exception as e:
+        st.error(f"完成儀式失敗：{e}")
+
+
+def render_ritual():
+    """週期儀式主路由"""
+    step = st.session_state.get("ritual_step", 1)
+
+    # 進度指示
+    st.progress(step / 4)
+    st.caption(f"步驟 {step} / 4")
+
+    if step == 1:
+        render_ritual_step1()
+    elif step == 2:
+        render_ritual_step2()
+    elif step == 3:
+        render_ritual_step3()
+    elif step == 4:
+        render_ritual_step4()
+
+
+# =============================================================================
 # UI 元件 - Dialogs
 # =============================================================================
 
@@ -1380,6 +1910,19 @@ def tab_strategy():
     """Tab 3: 策略"""
     st.header("策略")
 
+    # 初始化 ritual 狀態
+    if "ritual_active" not in st.session_state:
+        st.session_state.ritual_active = False
+    if "ritual_step" not in st.session_state:
+        st.session_state.ritual_step = 1
+    if "ritual_data" not in st.session_state:
+        st.session_state.ritual_data = {}
+
+    # 若儀式進行中，顯示儀式 UI
+    if st.session_state.get("ritual_active", False):
+        render_ritual()
+        return  # 不顯示其他內容
+
     # 錢包操作
     with st.expander("💰 錢包操作", expanded=True):
         wallet_balance = get_wallet_balance()
@@ -1420,18 +1963,21 @@ def tab_strategy():
             st.error(f"⚠️ 週期已結束，待結算")
             st.write(f"週期：{start_date.strftime('%m/%d')} ~ {end_date.strftime('%m/%d')}")
 
-            # 結算按鈕
-            if st.button("進行結算", type="primary", key="settle_btn"):
-                result = settle_period(period_id)
-                if result['success']:
-                    st.session_state["show_toast"] = result['message']
-                    st.rerun()
-                else:
-                    st.error(result['message'])
+            # 開始新週期儀式按鈕（會先結算）
+            if st.button("🌟 開始新週期", type="primary", use_container_width=True):
+                start_ritual()
+                st.rerun()
+            st.caption("（會先結算當前週期）")
         else:
             days_left = get_period_days_left(period)
             st.success(f"✓ 進行中")
             st.write(f"週期：{start_date.strftime('%m/%d')} ~ {end_date.strftime('%m/%d')}（剩 {days_left} 天）")
+
+            # 開始新週期儀式按鈕
+            if st.button("🌟 開始新週期", use_container_width=True):
+                start_ritual()
+                st.rerun()
+            st.caption("（會先結算當前週期）")
 
         # 當期總覽
         with st.expander("📊 當期總覽"):
@@ -1453,21 +1999,10 @@ def tab_strategy():
     else:
         st.info("無進行中週期")
 
-        # 簡易建立週期表單
-        with st.expander("建立新週期"):
-            col1, col2 = st.columns(2)
-            with col1:
-                new_start = st.date_input("開始日期", value=get_taiwan_today())
-            with col2:
-                new_end = st.date_input("結束日期", value=get_taiwan_today() + timedelta(days=30))
-
-            new_budget = st.number_input("Living 預算", min_value=0, value=30000, step=1000)
-
-            if st.button("建立週期", type="primary"):
-                period_id = add_period(new_start, new_end, new_budget)
-                if period_id:
-                    st.success(f"已建立週期：{period_id}")
-                    st.rerun()
+        # 開始新週期儀式按鈕
+        if st.button("🌟 開始新週期", type="primary", use_container_width=True):
+            start_ritual()
+            st.rerun()
 
     st.divider()
 
