@@ -1001,11 +1001,6 @@ def tab_strategy():
     # 銀行帳戶管理
     st.markdown("### 🏦 銀行帳戶管理")
 
-    # Callback 函式：清空新增帳戶輸入欄位
-    def clear_bank_inputs():
-        st.session_state["new_bank_name"] = ""
-        st.session_state["new_bank_note"] = ""
-
     bank_accounts = load_bank_accounts()
 
     if bank_accounts.empty:
@@ -1031,19 +1026,21 @@ def tab_strategy():
                 if st.button("編輯", key=f"edit_bank_{bank_id}", use_container_width=True):
                     dialog_edit_bank_account(bank_id, bank_name, bank_note, bank_status)
 
-    # 新增帳戶按鈕
+    # 新增帳戶
     with st.expander("+ 新增帳戶"):
-        bank_name_input = st.text_input("帳戶名稱", key="new_bank_name")
-        bank_note_input = st.text_input("備註（選填）", key="new_bank_note")
+        with st.form(key="add_bank_form", clear_on_submit=True):
+            bank_name_input = st.text_input("帳戶名稱")
+            bank_note_input = st.text_input("備註（選填）")
 
-        if st.button("新增帳戶", key="add_bank_btn"):
-            if bank_name_input:
-                if add_bank_account(bank_name_input, bank_note_input):
-                    st.session_state["show_toast"] = f"已新增帳戶：{bank_name_input}"
-                    clear_bank_inputs()  # 在 rerun 之前呼叫 callback
-                    st.rerun()
-            else:
-                st.error("請輸入帳戶名稱")
+            submitted = st.form_submit_button("新增帳戶")
+
+            if submitted:
+                if bank_name_input:
+                    if add_bank_account(bank_name_input, bank_note_input):
+                        st.session_state["show_toast"] = f"已新增帳戶：{bank_name_input}"
+                        st.rerun()
+                else:
+                    st.error("請輸入帳戶名稱")
 
     st.divider()
 
