@@ -1770,8 +1770,262 @@ def dialog_edit_bank_account(bank_id: str, current_name: str, current_note: str,
 
 
 # =============================================================================
+# Quick Expense Dialogs
+# =============================================================================
+
+@st.dialog("記錄支出")
+def quick_expense_dialog(category_id: str, category_name: str):
+    """快速記帳 Dialog"""
+    st.write(f"**科目：{category_name}**")
+
+    # Load sub_tags for this category
+    sub_tags = load_sub_tags()
+    category_sub_tags = pd.DataFrame()
+    if not sub_tags.empty and "Category_ID" in sub_tags.columns:
+        category_sub_tags = sub_tags[
+            (sub_tags["Category_ID"] == category_id) &
+            (sub_tags["Status"] == "Active")
+        ]
+
+    # Sub_tag selection (optional)
+    sub_tag_options = ["不選擇"]
+    if not category_sub_tags.empty:
+        sub_tag_options = sub_tag_options + category_sub_tags["Name"].tolist()
+    selected_sub_tag_name = st.selectbox("子類（選填）", sub_tag_options)
+
+    # Get sub_tag_id if selected
+    sub_tag_id = ""
+    if selected_sub_tag_name != "不選擇" and not category_sub_tags.empty:
+        sub_tag_row = category_sub_tags[category_sub_tags["Name"] == selected_sub_tag_name]
+        if not sub_tag_row.empty:
+            sub_tag_id = sub_tag_row.iloc[0]["Sub_Tag_ID"]
+
+    # Get defaults (with sub_tag override logic)
+    defaults = get_defaults_for_expense(category_id, sub_tag_id)
+
+    # Amount (required)
+    amount_str = st.text_input("金額 *", key="expense_amount", placeholder="輸入金額")
+
+    # Item (optional but recommended)
+    item = st.text_input("品項（選填）", key="expense_item")
+
+    # Note (optional)
+    note = st.text_input("備註（選填）", key="expense_note")
+
+    st.markdown("---")
+    st.caption("付款資訊")
+
+    # Bank Account selection
+    bank_accounts = load_bank_accounts()
+    bank_options = ["（未設定）"]
+    bank_id_map = {"（未設定）": ""}
+
+    if not bank_accounts.empty:
+        active_banks = bank_accounts[bank_accounts["Status"] == "Active"]
+        for _, bank in active_banks.iterrows():
+            bank_options.append(bank["Name"])
+            bank_id_map[bank["Name"]] = bank["Bank_ID"]
+
+    # Find default bank index
+    default_bank_idx = 0
+    if defaults.get("bank_id"):
+        for i, opt in enumerate(bank_options):
+            if bank_id_map.get(opt, "") == defaults["bank_id"]:
+                default_bank_idx = i
+                break
+
+    selected_bank_name = st.selectbox("銀行帳戶", bank_options, index=default_bank_idx)
+    bank_id = bank_id_map.get(selected_bank_name, "")
+
+    # Payment Method selection
+    payment_options = ["（未設定）", "直接付款", "信用卡"]
+    payment_map = {"直接付款": PAYMENT_DIRECT, "信用卡": PAYMENT_CREDIT}
+    reverse_payment_map = {PAYMENT_DIRECT: "直接付款", PAYMENT_CREDIT: "信用卡"}
+
+    # Find default payment index
+    default_payment_idx = 0
+    if defaults.get("payment_method"):
+        default_label = reverse_payment_map.get(defaults["payment_method"], "")
+        if default_label in payment_options:
+            default_payment_idx = payment_options.index(default_label)
+
+    selected_payment = st.selectbox("支付方式", payment_options, index=default_payment_idx)
+    payment_method = payment_map.get(selected_payment, "")
+
+    st.divider()
+
+    # Buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True, key="expense_cancel"):
+            st.rerun()
+    with col2:
+        if st.button("💸 記錄支出", type="primary", use_container_width=True, key="expense_submit"):
+            # Validate
+            amount = parse_amount(amount_str)
+            if amount is None or amount <= 0:
+                st.error("請輸入有效金額")
+                return
+
+            # Check active period
+            period = get_active_period()
+            if not period:
+                st.error("請先啟動週期儀式")
+                return
+
+            # Add transaction
+            success = add_transaction(
+                trans_type=TYPE_EXPENSE,
+                amount=amount,
+                account=ACCOUNT_LIVING,
+                category_id=category_id,
+                sub_tag_id=sub_tag_id,
+                item=item,
+                note=note,
+                period_id=period["Period_ID"],
+                bank_id=bank_id,
+                payment_method=payment_method
+            )
+
+            if success:
+                st.session_state["show_toast"] = f"✅ 已記錄 ${amount:,.0f}"
+                st.cache_data.clear()
+                st.rerun()
+
+
+@st.dialog("選擇科目")
+def select_category_dialog():
+    """科目選擇 Dialog（用於「更多」按鈕）"""
+    categories = load_categories()
+
+    if categories.empty:
+        st.info("尚無科目")
+        if st.button("關閉", use_container_width=True):
+            st.rerun()
+        return
+
+    active_cats = categories[categories["Status"] == "Active"]
+
+    if active_cats.empty:
+        st.info("尚無啟用中的科目")
+        if st.button("關閉", use_container_width=True):
+            st.rerun()
+        return
+
+    st.write("請選擇要記帳的科目：")
+
+    # Display all active categories as buttons in a grid
+    num_cols = 3
+    cols = st.columns(num_cols)
+
+    for i, (_, cat) in enumerate(active_cats.iterrows()):
+        with cols[i % num_cols]:
+            if st.button(cat["Name"], key=f"cat_select_{cat['Category_ID']}", use_container_width=True):
+                # Store selected category in session_state for chained dialog
+                st.session_state["open_expense_category"] = {
+                    "Category_ID": cat["Category_ID"],
+                    "Name": cat["Name"]
+                }
+                st.rerun()
+
+    st.divider()
+    if st.button("取消", use_container_width=True, key="cat_dialog_cancel"):
+        st.rerun()
+
+
+# =============================================================================
 # UI 元件 - Tab 1: 記帳
 # =============================================================================
+
+def render_category_progress(period_id: str):
+    """渲染科目進度區塊"""
+    categories = load_categories()
+
+    if categories.empty:
+        st.info("尚無科目資料")
+        return
+
+    active_cats = categories[categories["Status"] == "Active"]
+
+    if active_cats.empty:
+        st.info("尚無啟用中的科目")
+        return
+
+    st.markdown("### 📊 科目進度")
+
+    for _, cat in active_cats.iterrows():
+        budget = float(cat.get("Budget", 0) or 0)
+        if budget <= 0:
+            continue
+
+        # Calculate spent
+        spent = get_category_spent(cat["Category_ID"], period_id)
+
+        # Calculate progress
+        progress = min(spent / budget, 1.0) if budget > 0 else 0
+
+        # Display
+        warning = " ⚠️" if progress >= 0.9 else ""
+        st.caption(f"**{cat['Name']}**{warning}")
+        st.progress(min(progress, 1.0))
+        remaining = budget - spent
+        if remaining < 0:
+            st.caption(f"${spent:,.0f} / ${budget:,.0f}（超支 ${abs(remaining):,.0f}）")
+        else:
+            st.caption(f"${spent:,.0f} / ${budget:,.0f}（剩餘 ${remaining:,.0f}）")
+
+
+def render_transaction_list(period_id: str):
+    """渲染本期消費紀錄"""
+    with st.expander("📋 本期消費紀錄", expanded=False):
+        transactions = load_transactions()
+
+        if transactions.empty:
+            st.info("尚無交易記錄")
+            return
+
+        period_txns = transactions[
+            (transactions["Period_ID"] == period_id) &
+            (transactions["Type"] == TYPE_EXPENSE) &
+            (transactions["Account"] == ACCOUNT_LIVING)
+        ].sort_values("Date", ascending=False)
+
+        if period_txns.empty:
+            st.info("本期尚無消費紀錄")
+            return
+
+        # Get reference data
+        categories = load_categories()
+        cat_map = {}
+        if not categories.empty:
+            cat_map = dict(zip(categories["Category_ID"], categories["Name"]))
+
+        bank_accounts = load_bank_accounts()
+        bank_map = {}
+        if not bank_accounts.empty:
+            bank_map = dict(zip(bank_accounts["Bank_ID"], bank_accounts["Name"]))
+
+        # Display
+        for _, txn in period_txns.head(20).iterrows():
+            date_val = txn["Date"]
+            if isinstance(date_val, str):
+                date_str = pd.to_datetime(date_val).strftime("%m/%d")
+            elif hasattr(date_val, 'strftime'):
+                date_str = date_val.strftime("%m/%d")
+            else:
+                date_str = str(date_val)[:5]
+
+            cat_name = cat_map.get(txn.get("Category_ID", ""), "—")
+            item = txn.get("Item", "") or "—"
+            amount = float(txn.get("Amount", 0))
+            bank_name = bank_map.get(txn.get("Bank_ID", ""), "")
+
+            payment = txn.get("Payment_Method", "")
+            payment_icon = "💳" if payment == PAYMENT_CREDIT else ("💵" if payment == PAYMENT_DIRECT else "")
+
+            bank_display = f" · {bank_name}" if bank_name else ""
+            st.markdown(f"**{date_str}** {cat_name} · {item}  **-${amount:,.0f}**{bank_display} {payment_icon}")
+
 
 def tab_expense():
     """Tab 1: 記帳"""
@@ -1780,26 +2034,36 @@ def tab_expense():
     # 載入設定
     config = load_config()
 
+    # Handle chained dialog from "More" category selection
+    if st.session_state.get("open_expense_category"):
+        cat = st.session_state["open_expense_category"]
+        st.session_state["open_expense_category"] = None
+        quick_expense_dialog(cat["Category_ID"], cat["Name"])
+
     # 狀態總覽區域
     period = get_active_period()
 
+    # === Status Overview (2x2 grid) ===
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("💰 錢包", f"${get_wallet_balance():,.0f}")
+        wallet = get_wallet_balance()
+        st.metric("💰 錢包", f"${wallet:,.0f}")
     with col2:
         backup_balance = get_backup_balance()
         backup_limit = float(config.get("Back_Up_Limit", 150000) or 150000)
-        backup_pct = (backup_balance / backup_limit * 100) if backup_limit > 0 else 0
-        st.metric("🛡️ Back Up", f"${backup_balance:,.0f}")
+        backup_pct = backup_balance / backup_limit if backup_limit > 0 else 0
+
         if backup_balance < 0:
-            st.error(f"⚠️ 已透支！")
+            st.metric("🛡️ Back Up", f"${backup_balance:,.0f}")
+            st.error("⚠️ 已透支！需補平")
         else:
-            st.progress(min(backup_pct / 100, 1.0))
-            st.caption(f"{backup_pct:.0f}% / ${backup_limit:,.0f}")
+            st.metric("🛡️ Back Up", f"${backup_balance:,.0f} ({backup_pct:.0%})")
+            st.progress(min(max(backup_pct, 0), 1.0))
 
     col3, col4 = st.columns(2)
     with col3:
-        st.metric("✨ Free Fund", f"${get_free_fund_balance():,.0f}")
+        free_fund = get_free_fund_balance()
+        st.metric("✨ Free Fund", f"${free_fund:,.0f}")
     with col4:
         if period is not None:
             days_left = get_period_days_left(period)
@@ -1810,104 +2074,82 @@ def tab_expense():
                 end_date = end_date.date()
 
             if is_period_overdue(period):
-                st.warning(f"⚠️ 週期已結束，待結算")
+                st.warning("⚠️ 週期已結束，待結算")
             else:
-                st.metric("📅 週期剩餘", f"{days_left} 天")
-                st.caption(f"至 {end_date.strftime('%m/%d')}")
+                st.metric("📅 週期剩餘", f"{days_left} 天（至 {end_date.strftime('%m/%d')}）")
         else:
-            st.info("📅 無進行中週期")
+            st.warning("📅 無進行中週期")
 
     st.divider()
 
-    # 今日可用額度（大字顯示）
+    # === Daily Available ===
     if period is not None and not is_period_overdue(period):
         period_id = period["Period_ID"]
         daily = get_daily_available(period_id)
         remaining = get_living_remaining(period_id)
         days_left = get_period_days_left(period)
 
-        st.markdown("### 今日可用額度")
         if daily >= 0:
-            st.markdown(f"## ${daily:,.0f}")
+            st.markdown(f"### 今日可用：${daily:,.0f}")
         else:
-            st.markdown(f"## :red[${daily:,.0f}]")
+            st.markdown(f"### 今日可用：:red[${daily:,.0f}]")
             st.error("Living 已超支！")
         st.caption(f"Living 剩餘 ${remaining:,.0f} ÷ {days_left} 天")
     elif period is not None and is_period_overdue(period):
         st.warning("⚠️ 週期已結束，請到「策略」頁面進行結算")
+        return  # Don't show expense UI if period is overdue
     else:
-        st.warning("請先到「策略」頁面啟動週期儀式")
+        st.warning("請先至「策略」頁啟動週期儀式")
+        return  # Don't show expense UI if no period
 
     st.divider()
 
-    # 科目進度區域
-    st.markdown("### 📊 各科目本期狀態")
+    # === Quick Access Buttons ===
+    st.markdown("### ⚡ 快速記帳")
 
-    if period is not None:
-        period_id = period["Period_ID"]
-        categories = load_categories()
+    categories = load_categories()
+    quick_cats = pd.DataFrame()
 
-        if not categories.empty and "Status" in categories.columns:
-            active_cats = categories[categories["Status"] == "Active"]
-
-            if active_cats.empty:
-                st.info("尚無啟用中的科目")
-            else:
-                for _, cat in active_cats.iterrows():
-                    cat_id = cat["Category_ID"]
-                    cat_name = cat["Name"]
-                    budget = float(cat["Budget"]) if cat.get("Budget") else 0
-
-                    spent = get_category_spent(cat_id, period_id)
-
-                    if budget > 0:
-                        progress = spent / budget
-                        warning = " ⚠️" if progress > 0.9 else ""
-
-                        st.write(f"**{cat_name}**{warning}")
-                        st.progress(min(progress, 1.0))
-                        st.caption(f"${spent:,.0f} / ${budget:,.0f} ({progress*100:.0f}%)")
-                    else:
-                        st.write(f"**{cat_name}** — 未設定預算")
-                        if spent > 0:
-                            st.caption(f"已花：${spent:,.0f}")
+    if not categories.empty:
+        active_cats = categories[categories["Status"] == "Active"]
+        # Check if Is_Quick_Access column exists
+        if "Is_Quick_Access" in active_cats.columns:
+            quick_cats = active_cats[
+                active_cats["Is_Quick_Access"].astype(str).str.upper().isin(["TRUE", "1", "Y", "YES"])
+            ]
         else:
-            st.info("尚無科目資料")
+            # Fallback: use first 6 active categories
+            quick_cats = active_cats.head(6)
+
+    if not quick_cats.empty:
+        # Limit to 6 quick access categories
+        quick_cats_limited = quick_cats.head(6)
+        num_buttons = len(quick_cats_limited) + 1  # +1 for "more" button
+        cols = st.columns(min(num_buttons, 7))
+
+        for i, (_, cat) in enumerate(quick_cats_limited.iterrows()):
+            with cols[i]:
+                if st.button(cat["Name"], key=f"quick_{cat['Category_ID']}", use_container_width=True):
+                    quick_expense_dialog(cat["Category_ID"], cat["Name"])
+
+        # "More" button
+        with cols[min(len(quick_cats_limited), 6)]:
+            if st.button("📝 更多", use_container_width=True, key="more_categories"):
+                select_category_dialog()
     else:
-        st.info("啟動週期後顯示科目進度")
+        st.info("尚無科目，請先在「策略」頁面設定")
+        if st.button("📝 選擇科目", use_container_width=True, key="select_cat_btn"):
+            select_category_dialog()
 
     st.divider()
 
-    # Placeholder
-    st.markdown("### 快速記帳")
-    st.caption("功能建置中...")
+    # === Category Progress ===
+    render_category_progress(period_id)
 
     st.divider()
 
-    # 本期消費紀錄
-    st.markdown("### 本期消費紀錄")
-    transactions = load_transactions()
-    if not transactions.empty and period is not None:
-        period_id = period["Period_ID"]
-        expenses = transactions[
-            (transactions["Type"] == TYPE_EXPENSE) &
-            (transactions["Period_ID"] == period_id)
-        ]
-        if not expenses.empty:
-            # 按日期倒序排列
-            expenses_sorted = expenses.sort_values("Date", ascending=False)
-            st.dataframe(expenses_sorted.head(10), use_container_width=True)
-        else:
-            st.info("本期尚無消費紀錄")
-    elif not transactions.empty:
-        expenses = transactions[transactions["Type"] == TYPE_EXPENSE]
-        if not expenses.empty:
-            expenses_sorted = expenses.sort_values("Date", ascending=False)
-            st.dataframe(expenses_sorted.head(10), use_container_width=True)
-        else:
-            st.info("尚無消費紀錄")
-    else:
-        st.info("尚無交易記錄")
+    # === Transaction List ===
+    render_transaction_list(period_id)
 
 
 # =============================================================================
