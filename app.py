@@ -1203,38 +1203,62 @@ def render_ritual_step2():
     st.markdown("### 💫 週期儀式 — Step 2/4")
     st.markdown("#### 📍 設定新週期")
 
+    # UX-2: 顯示目前可用資金
+    wallet_balance = get_wallet_balance()
+    free_fund = get_free_fund_balance()
+    backup = get_backup_balance()
+
+    st.markdown("##### 💰 目前可用資金")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("錢包", f"${wallet_balance:,.0f}")
+    with col2:
+        st.metric("Free Fund", f"${free_fund:,.0f}")
+    with col3:
+        st.metric("Back Up", f"${backup:,.0f}")
+    st.divider()
+
     today = get_taiwan_today()
 
-    # 開始日期（固定為今天）
-    st.write(f"**開始日期：** {today.strftime('%Y-%m-%d')}（今天）")
+    # UX-1: 開始日期可編輯
+    saved_start = st.session_state.ritual_data.get("start_date", today)
+    start_date = st.date_input(
+        "開始日期",
+        value=saved_start,
+        max_value=today,  # 不能選未來日期
+        key="ritual_start_date"
+    )
+    st.session_state.ritual_data["start_date"] = start_date
 
     # 結束日期
-    default_end = today + timedelta(days=30)
+    default_end = start_date + timedelta(days=30)
 
     # 快捷按鈕
     st.caption("快速選擇結束日期：")
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("一個月後", use_container_width=True):
-            st.session_state.ritual_data["end_date"] = today + timedelta(days=30)
+            st.session_state.ritual_data["end_date"] = start_date + timedelta(days=30)
             st.rerun()
     with col2:
         if st.button("兩週後", use_container_width=True):
-            st.session_state.ritual_data["end_date"] = today + timedelta(days=14)
+            st.session_state.ritual_data["end_date"] = start_date + timedelta(days=14)
             st.rerun()
     with col3:
         if st.button("一週後", use_container_width=True):
-            st.session_state.ritual_data["end_date"] = today + timedelta(days=7)
+            st.session_state.ritual_data["end_date"] = start_date + timedelta(days=7)
             st.rerun()
 
     # 手動選擇
     saved_end = st.session_state.ritual_data.get("end_date", default_end)
-    end_date = st.date_input("預計結束日期", value=saved_end, min_value=today + timedelta(days=1))
+    # 確保 saved_end 不早於 start_date
+    if saved_end <= start_date:
+        saved_end = start_date + timedelta(days=30)
+    end_date = st.date_input("預計結束日期", value=saved_end, min_value=start_date + timedelta(days=1))
     st.session_state.ritual_data["end_date"] = end_date
-    st.session_state.ritual_data["start_date"] = today
 
     # 顯示週期長度
-    days_count = (end_date - today).days + 1
+    days_count = (end_date - start_date).days + 1
     st.caption(f"週期長度：{days_count} 天")
 
     st.divider()
@@ -1254,6 +1278,22 @@ def render_ritual_step3():
     """Step 3: 審視信封架構"""
     st.markdown("### 💫 週期儀式 — Step 3/4")
     st.markdown("#### 📍 審視信封架構")
+
+    # UX-2: 顯示目前可用資金
+    wallet_balance = get_wallet_balance()
+    free_fund = get_free_fund_balance()
+    backup = get_backup_balance()
+
+    st.markdown("##### 💰 目前可用資金")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("錢包", f"${wallet_balance:,.0f}")
+    with col2:
+        st.metric("Free Fund", f"${free_fund:,.0f}")
+    with col3:
+        st.metric("Back Up", f"${backup:,.0f}")
+    st.divider()
+
     st.caption("設定各科目的本期預算")
 
     categories = load_categories()
