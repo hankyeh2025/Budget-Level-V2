@@ -956,7 +956,13 @@ def get_saving_balance(goal_id: str) -> float:
     """
     Calculate Saving goal/pool balance.
 
-    Formula: Σ Saving_In - Σ Saving_Out (where Goal_ID matches)
+    Formula: Σ Saving_In - Σ Saving_Out - Σ Transfer_Out + Σ Transfer_In
+
+    Where:
+    - Saving_In: Type='Saving_In' AND Goal_ID=goal_id
+    - Saving_Out: Type='Saving_Out' AND Goal_ID=goal_id
+    - Transfer_Out: Type='Transfer' AND Account='Saving' AND Goal_ID=goal_id
+    - Transfer_In: Type='Transfer' AND Target_Account='Saving' AND Goal_ID=goal_id
 
     Args:
         goal_id: The Goal_ID to calculate balance for
@@ -968,24 +974,40 @@ def get_saving_balance(goal_id: str) -> float:
     if transactions.empty:
         return 0.0
 
+    # Saving_In
     saving_in = transactions[
         (transactions["Type"] == TYPE_SAVING_IN) &
         (transactions["Goal_ID"] == goal_id)
     ]["Amount"].sum()
 
+    # Saving_Out
     saving_out = transactions[
         (transactions["Type"] == TYPE_SAVING_OUT) &
         (transactions["Goal_ID"] == goal_id)
     ]["Amount"].sum()
 
-    return float(saving_in - saving_out)
+    # Transfer_Out (從此 Saving 轉出)
+    transfer_out = transactions[
+        (transactions["Type"] == TYPE_TRANSFER) &
+        (transactions["Account"] == ACCOUNT_SAVING) &
+        (transactions["Goal_ID"] == goal_id)
+    ]["Amount"].sum()
+
+    # Transfer_In (轉入此 Saving)
+    transfer_in = transactions[
+        (transactions["Type"] == TYPE_TRANSFER) &
+        (transactions["Target_Account"] == ACCOUNT_SAVING) &
+        (transactions["Goal_ID"] == goal_id)
+    ]["Amount"].sum()
+
+    return float(saving_in - saving_out - transfer_out + transfer_in)
 
 
 def get_saving_transactions(goal_id: str):
     """
     Get all transactions for a Saving goal/pool.
 
-    Filters transactions where Goal_ID matches and Type is Saving_In or Saving_Out.
+    Filters transactions where Goal_ID matches and Type is Saving_In, Saving_Out, or Transfer.
     Returns sorted by Timestamp descending (newest first).
 
     Args:
@@ -998,10 +1020,10 @@ def get_saving_transactions(goal_id: str):
     if transactions.empty:
         return transactions
 
-    # Filter by Goal_ID and Saving types
+    # Filter by Goal_ID and relevant types (including Transfer)
     filtered = transactions[
         (transactions["Goal_ID"] == goal_id) &
-        (transactions["Type"].isin([TYPE_SAVING_IN, TYPE_SAVING_OUT]))
+        (transactions["Type"].isin([TYPE_SAVING_IN, TYPE_SAVING_OUT, TYPE_TRANSFER]))
     ].copy()
 
     if filtered.empty:
@@ -2913,6 +2935,8 @@ def render_saving_transactions(goal_id: str):
     Display format:
     - Saving_In: +$X (date) note
     - Saving_Out: -$X (date) category/item note
+    - Transfer (out): -$X (date) 轉帳至 [target]
+    - Transfer (in): +$X (date) 從 [source] 轉入
     """
     txns = get_saving_transactions(goal_id)
 
@@ -2941,6 +2965,23 @@ def render_saving_transactions(goal_id: str):
                 line += f"　{category}"
                 if item:
                     line += f"/{item}"
+            if note:
+                line += f"　{note}"
+            st.caption(line)
+        elif txn_type == TYPE_TRANSFER:
+            # Transfer: 判斷是轉入還是轉出
+            account = txn.get("Account", "") or ""
+            target_account = txn.get("Target_Account", "") or ""
+
+            if account == ACCOUNT_SAVING:
+                # 轉出
+                target_display = target_account if target_account != "Wallet" else "錢包"
+                line = f"↗️ ${amount:,.0f}　{date_str}　轉出至 {target_display}"
+            else:
+                # 轉入
+                source_display = account if account else "其他帳戶"
+                line = f"↘️ ${amount:,.0f}　{date_str}　從 {source_display} 轉入"
+
             if note:
                 line += f"　{note}"
             st.caption(line)
