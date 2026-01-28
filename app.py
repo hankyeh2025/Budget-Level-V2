@@ -655,6 +655,59 @@ def update_saving_goal_status(goal_id: str, status: str) -> bool:
         return False
 
 
+def add_saving_goal(name: str, has_target: bool, target_amount: float = 0,
+                    deadline: str = "", default_bank_id: str = "",
+                    default_payment_method: str = "") -> bool:
+    """
+    Add a new Saving Goal or Pool to the sheet
+
+    Args:
+        name: Goal/pool name
+        has_target: True for goal with target, False for pool
+        target_amount: Target amount (only for goals)
+        deadline: Optional deadline date string
+        default_bank_id: Default bank for withdrawals
+        default_payment_method: Default payment method for withdrawals
+
+    Returns:
+        bool: True if successful
+    """
+    try:
+        spreadsheet = get_spreadsheet()
+        if spreadsheet is None:
+            return False
+
+        ws = spreadsheet.worksheet(SHEET_SAVING_GOAL)
+
+        # Generate Goal_ID
+        goal_id = f"GOAL{int(get_taiwan_now().timestamp())}"
+
+        # Prepare row data (must match sheet column order)
+        # Columns: Goal_ID, Name, Has_Target, Target_Amount, Deadline, Accumulated,
+        #          Status, Created_At, Completed_At, Default_Bank_ID, Default_Payment_Method
+        new_row = [
+            goal_id,
+            name,
+            "TRUE" if has_target else "FALSE",  # Google Sheets boolean format
+            target_amount if has_target else 0,
+            deadline,
+            0,  # Accumulated (calculated from transactions)
+            "Active",
+            get_taiwan_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "",  # Completed_At
+            default_bank_id,
+            default_payment_method
+        ]
+
+        ws.append_row(new_row, value_input_option="USER_ENTERED")
+        st.cache_data.clear()
+        return True
+
+    except Exception as e:
+        st.error(f"新增目標失敗: {e}")
+        return False
+
+
 # =============================================================================
 # 工具函式
 # =============================================================================
@@ -2501,6 +2554,141 @@ def dialog_complete_goal(goal_id: str, goal_name: str, target_amount: float):
                 st.error("操作失敗，請稍後再試")
 
 
+@st.dialog("新增目標")
+def dialog_add_goal():
+    """Dialog for adding a new Saving goal with target"""
+    st.caption("建立有目標金額的儲蓄計畫")
+
+    # Load bank accounts for dropdown
+    banks = load_bank_accounts()
+    active_banks = banks[banks["Status"] == "Active"] if not banks.empty else pd.DataFrame()
+
+    # Name (required)
+    name = st.text_input("目標名稱 *", placeholder="例：買 Switch", key="add_goal_name")
+
+    # Target Amount (required)
+    target_str = st.text_input("目標金額 *", placeholder="例：12000", key="add_goal_target")
+
+    # Deadline (optional)
+    use_deadline = st.checkbox("設定截止日期", key="add_goal_use_deadline")
+    deadline = ""
+    if use_deadline:
+        deadline_date = st.date_input("截止日期", key="add_goal_deadline")
+        deadline = deadline_date.strftime("%Y-%m-%d")
+
+    # Default Bank Account (optional)
+    st.divider()
+    st.caption("預設值（支出時自動帶入）")
+
+    bank_names = ["（不設定）"] + (active_banks["Name"].tolist() if not active_banks.empty else [])
+    bank_ids = [""] + (active_banks["Bank_ID"].tolist() if not active_banks.empty else [])
+    selected_bank_idx = st.selectbox("預設銀行帳戶", range(len(bank_names)),
+                                      format_func=lambda x: bank_names[x], key="add_goal_bank")
+    selected_bank_id = bank_ids[selected_bank_idx]
+
+    # Default Payment Method (optional)
+    payment_names = ["（不設定）", "直接付款", "信用卡"]
+    payment_values = ["", PAYMENT_DIRECT, PAYMENT_CREDIT]
+    selected_payment_idx = st.selectbox("預設支付方式", range(len(payment_names)),
+                                         format_func=lambda x: payment_names[x], key="add_goal_payment")
+    selected_payment_value = payment_values[selected_payment_idx]
+
+    st.divider()
+
+    # Buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True, key="add_goal_cancel"):
+            st.rerun()
+    with col2:
+        if st.button("建立", type="primary", use_container_width=True, key="add_goal_submit"):
+            # Validation
+            if not name.strip():
+                st.error("請輸入目標名稱")
+                return
+
+            target_amount = parse_amount(target_str)
+            if target_amount <= 0:
+                st.error("請輸入有效的目標金額")
+                return
+
+            # Create goal
+            success = add_saving_goal(
+                name=name.strip(),
+                has_target=True,
+                target_amount=target_amount,
+                deadline=deadline,
+                default_bank_id=selected_bank_id,
+                default_payment_method=selected_payment_value
+            )
+
+            if success:
+                st.session_state["show_toast"] = f"✅ 已建立目標「{name.strip()}」"
+                st.rerun()
+            else:
+                st.error("建立失敗，請稍後再試")
+
+
+@st.dialog("新增資金池")
+def dialog_add_pool():
+    """Dialog for adding a new Saving pool without target"""
+    st.caption("建立無目標金額的資金池（如：投資、旅遊基金）")
+
+    # Load bank accounts for dropdown
+    banks = load_bank_accounts()
+    active_banks = banks[banks["Status"] == "Active"] if not banks.empty else pd.DataFrame()
+
+    # Name (required)
+    name = st.text_input("資金池名稱 *", placeholder="例：投資", key="add_pool_name")
+
+    # Default Bank Account (optional)
+    st.divider()
+    st.caption("預設值（支出時自動帶入）")
+
+    bank_names = ["（不設定）"] + (active_banks["Name"].tolist() if not active_banks.empty else [])
+    bank_ids = [""] + (active_banks["Bank_ID"].tolist() if not active_banks.empty else [])
+    selected_bank_idx = st.selectbox("預設銀行帳戶", range(len(bank_names)),
+                                      format_func=lambda x: bank_names[x], key="add_pool_bank")
+    selected_bank_id = bank_ids[selected_bank_idx]
+
+    # Default Payment Method (optional)
+    payment_names = ["（不設定）", "直接付款", "信用卡"]
+    payment_values = ["", PAYMENT_DIRECT, PAYMENT_CREDIT]
+    selected_payment_idx = st.selectbox("預設支付方式", range(len(payment_names)),
+                                         format_func=lambda x: payment_names[x], key="add_pool_payment")
+    selected_payment_value = payment_values[selected_payment_idx]
+
+    st.divider()
+
+    # Buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True, key="add_pool_cancel"):
+            st.rerun()
+    with col2:
+        if st.button("建立", type="primary", use_container_width=True, key="add_pool_submit"):
+            # Validation
+            if not name.strip():
+                st.error("請輸入資金池名稱")
+                return
+
+            # Create pool
+            success = add_saving_goal(
+                name=name.strip(),
+                has_target=False,
+                target_amount=0,
+                deadline="",
+                default_bank_id=selected_bank_id,
+                default_payment_method=selected_payment_value
+            )
+
+            if success:
+                st.session_state["show_toast"] = f"✅ 已建立資金池「{name.strip()}」"
+                st.rerun()
+            else:
+                st.error("建立失敗，請稍後再試")
+
+
 def render_goal_card(row):
     """Render a goal card (Has_Target = TRUE)"""
     goal_id = row["Goal_ID"]
@@ -2571,11 +2759,11 @@ def tab_goals():
         st.info("尚未建立任何目標")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("+ 新增目標", use_container_width=True):
-                st.info("功能開發中")
+            if st.button("➕ 新增目標", use_container_width=True, key="btn_add_goal_empty"):
+                dialog_add_goal()
         with col2:
-            if st.button("+ 新增資金池", use_container_width=True):
-                st.info("功能開發中")
+            if st.button("➕ 新增資金池", use_container_width=True, key="btn_add_pool_empty"):
+                dialog_add_pool()
         return
 
     # Split by Status and Has_Target
@@ -2601,14 +2789,14 @@ def tab_goals():
         for _, row in pool_goals.iterrows():
             render_pool_card(row)
 
-    # Add buttons (placeholder)
+    # Add buttons
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("+ 新增目標", use_container_width=True, key="add_goal_main"):
-            st.info("功能開發中")
+        if st.button("➕ 新增目標", use_container_width=True, key="btn_add_goal"):
+            dialog_add_goal()
     with col2:
-        if st.button("+ 新增資金池", use_container_width=True, key="add_pool_main"):
-            st.info("功能開發中")
+        if st.button("➕ 新增資金池", use_container_width=True, key="btn_add_pool"):
+            dialog_add_pool()
 
     # Section: Completed
     if not completed_goals.empty:
