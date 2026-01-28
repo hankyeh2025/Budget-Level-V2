@@ -2403,6 +2403,11 @@ def dialog_saving_withdraw(goal_id: str, goal_name: str, default_bank_id: str = 
 @st.dialog("完成目標")
 def dialog_complete_goal(goal_id: str, goal_name: str, target_amount: float):
     """Dialog for completing a Saving goal"""
+    # Clear stale session state for this dialog's inputs
+    for key in list(st.session_state.keys()):
+        if key.startswith("complete_") and key.endswith(f"_{goal_id}"):
+            del st.session_state[key]
+
     st.write(f"**目標：{goal_name}**")
 
     current_balance = get_saving_balance(goal_id)
@@ -2418,7 +2423,7 @@ def dialog_complete_goal(goal_id: str, goal_name: str, target_amount: float):
     amount_str = st.text_input(
         "實際支出金額 *",
         value=default_amount,
-        key="complete_amount"
+        key=f"complete_amount_{goal_id}"
     )
 
     # Calculate and show difference
@@ -2433,17 +2438,17 @@ def dialog_complete_goal(goal_id: str, goal_name: str, target_amount: float):
         st.info("實際支出 = 累積金額，無差額")
 
     # Note
-    note = st.text_input("備註", placeholder="選填", key="complete_note")
+    note = st.text_input("備註", placeholder="選填", key=f"complete_note_{goal_id}")
 
     st.divider()
 
     # Buttons
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("取消", use_container_width=True, key="complete_cancel"):
+        if st.button("取消", use_container_width=True, key=f"complete_cancel_{goal_id}"):
             st.rerun()
     with col2:
-        if st.button("確認完成", type="primary", use_container_width=True, key="complete_submit"):
+        if st.button("確認完成", type="primary", use_container_width=True, key=f"complete_submit_{goal_id}"):
             # Validation
             if amount <= 0:
                 st.error("請輸入有效金額")
@@ -2637,16 +2642,11 @@ def tab_goals():
                     except Exception:
                         date_str = str(completed_at)[:7]
 
-                # Display: target and actual expense
-                display_text = f"✓ {name}"
+                # Display: cleaner format with actual expense first
                 if target > 0:
-                    display_text += f"　目標 ${target:,.0f} / 實際 ${actual_expense:,.0f}"
+                    st.caption(f"✓ {name}　${actual_expense:,.0f}（目標 ${target:,.0f}）　{date_str}")
                 else:
-                    display_text += f"　實際 ${actual_expense:,.0f}"
-                if date_str:
-                    display_text += f"　{date_str}"
-
-                st.caption(display_text)
+                    st.caption(f"✓ {name}　${actual_expense:,.0f}　{date_str}")
 
 
 # =============================================================================
