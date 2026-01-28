@@ -11,6 +11,7 @@ import pandas as pd
 from datetime import datetime, date, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
+import time
 
 # =============================================================================
 # 常數定義
@@ -2403,10 +2404,11 @@ def dialog_saving_withdraw(goal_id: str, goal_name: str, default_bank_id: str = 
 @st.dialog("完成目標")
 def dialog_complete_goal(goal_id: str, goal_name: str, target_amount: float):
     """Dialog for completing a Saving goal"""
-    # Clear stale session state for this dialog's inputs
-    for key in list(st.session_state.keys()):
-        if key.startswith("complete_") and key.endswith(f"_{goal_id}"):
-            del st.session_state[key]
+    # Generate unique dialog instance key (fresh each time dialog opens)
+    dialog_instance_key = f"complete_dialog_instance_{goal_id}"
+    if dialog_instance_key not in st.session_state:
+        st.session_state[dialog_instance_key] = int(time.time() * 1000)
+    instance_id = st.session_state[dialog_instance_key]
 
     st.write(f"**目標：{goal_name}**")
 
@@ -2418,12 +2420,12 @@ def dialog_complete_goal(goal_id: str, goal_name: str, target_amount: float):
 
     st.divider()
 
-    # Actual expense input (default = current balance)
-    default_amount = f"{current_balance:,.0f}".replace(",", "") if current_balance > 0 else ""
+    # Actual expense input - use key with instance_id for fresh state
+    default_amount = str(int(current_balance)) if current_balance > 0 else ""
     amount_str = st.text_input(
         "實際支出金額 *",
         value=default_amount,
-        key=f"complete_amount_{goal_id}"
+        key=f"complete_amount_{goal_id}_{instance_id}"
     )
 
     # Calculate and show difference
@@ -2437,18 +2439,20 @@ def dialog_complete_goal(goal_id: str, goal_name: str, target_amount: float):
     else:
         st.info("實際支出 = 累積金額，無差額")
 
-    # Note
-    note = st.text_input("備註", placeholder="選填", key=f"complete_note_{goal_id}")
+    # Note - also use instance_id
+    note = st.text_input("備註", placeholder="選填", key=f"complete_note_{goal_id}_{instance_id}")
 
     st.divider()
 
     # Buttons
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("取消", use_container_width=True, key=f"complete_cancel_{goal_id}"):
+        if st.button("取消", use_container_width=True, key=f"complete_cancel_{goal_id}_{instance_id}"):
+            # Clear instance key so next open gets fresh state
+            del st.session_state[dialog_instance_key]
             st.rerun()
     with col2:
-        if st.button("確認完成", type="primary", use_container_width=True, key=f"complete_submit_{goal_id}"):
+        if st.button("確認完成", type="primary", use_container_width=True, key=f"complete_submit_{goal_id}_{instance_id}"):
             # Validation
             if amount <= 0:
                 st.error("請輸入有效金額")
@@ -2488,6 +2492,8 @@ def dialog_complete_goal(goal_id: str, goal_name: str, target_amount: float):
                 success = update_saving_goal_status(goal_id, "Completed")
 
             if success:
+                # Clear instance key on success
+                del st.session_state[dialog_instance_key]
                 st.session_state["show_toast"] = f"✅ 目標「{goal_name}」已完成！"
                 st.cache_data.clear()
                 st.rerun()
@@ -2642,11 +2648,11 @@ def tab_goals():
                     except Exception:
                         date_str = str(completed_at)[:7]
 
-                # Display: cleaner format with actual expense first
+                # Display: target and actual expense
                 if target > 0:
-                    st.caption(f"✓ {name}　${actual_expense:,.0f}（目標 ${target:,.0f}）　{date_str}")
+                    st.caption(f"✓ {name}　目標 ${target:,.0f} / 實際 ${actual_expense:,.0f}　{date_str}")
                 else:
-                    st.caption(f"✓ {name}　${actual_expense:,.0f}　{date_str}")
+                    st.caption(f"✓ {name}　實際 ${actual_expense:,.0f}　{date_str}")
 
 
 # =============================================================================
