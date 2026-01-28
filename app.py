@@ -2253,12 +2253,118 @@ def dialog_saving_deposit(goal_id: str, goal_name: str):
                 st.error("存入失敗，請稍後再試")
 
 
+@st.dialog("支出")
+def dialog_saving_withdraw(goal_id: str, goal_name: str, default_bank_id: str = "", default_payment_method: str = ""):
+    """Dialog for withdrawing money from a Saving goal/pool"""
+    st.write(f"**目標：{goal_name}**")
+
+    # Show current balance for reference
+    current_balance = get_saving_balance(goal_id)
+    st.caption(f"目前餘額：${current_balance:,.0f}")
+
+    # Load data for dropdowns
+    categories = load_categories()
+    active_cats = categories[categories["Status"] == "Active"] if not categories.empty else pd.DataFrame()
+
+    banks = load_bank_accounts()
+    active_banks = banks[banks["Status"] == "Active"] if not banks.empty else pd.DataFrame()
+
+    # Category selection (required)
+    if active_cats.empty:
+        st.warning("請先在策略頁建立科目")
+        if st.button("關閉", use_container_width=True):
+            st.rerun()
+        return
+
+    cat_names = ["（請選擇）"] + active_cats["Name"].tolist()
+    cat_ids = [""] + active_cats["Category_ID"].tolist()
+    selected_cat_idx = st.selectbox("科目 *", range(len(cat_names)), format_func=lambda x: cat_names[x], key="withdraw_cat")
+    selected_cat_id = cat_ids[selected_cat_idx]
+
+    # Amount (required)
+    amount_str = st.text_input("金額 *", placeholder="例：5000", key="withdraw_amount")
+
+    # Item (required)
+    item = st.text_input("品項 *", placeholder="例：買 0050", key="withdraw_item")
+
+    # Note (optional)
+    note = st.text_input("備註", placeholder="選填", key="withdraw_note")
+
+    st.divider()
+    st.caption("付款資訊")
+
+    # Bank Account (optional, with default)
+    bank_names = ["（未設定）"] + (active_banks["Name"].tolist() if not active_banks.empty else [])
+    bank_ids = [""] + (active_banks["Bank_ID"].tolist() if not active_banks.empty else [])
+    default_bank_idx = 0
+    if default_bank_id and default_bank_id in bank_ids:
+        default_bank_idx = bank_ids.index(default_bank_id)
+    selected_bank_idx = st.selectbox("銀行帳戶", range(len(bank_names)), format_func=lambda x: bank_names[x], index=default_bank_idx, key="withdraw_bank")
+    selected_bank_id = bank_ids[selected_bank_idx]
+
+    # Payment Method (optional, with default)
+    payment_names = ["（未設定）", "直接付款", "信用卡"]
+    payment_values = ["", PAYMENT_DIRECT, PAYMENT_CREDIT]
+    default_payment_idx = 0
+    if default_payment_method and default_payment_method in payment_values:
+        default_payment_idx = payment_values.index(default_payment_method)
+    selected_payment_idx = st.selectbox("支付方式", range(len(payment_names)), format_func=lambda x: payment_names[x], index=default_payment_idx, key="withdraw_payment")
+    selected_payment_value = payment_values[selected_payment_idx]
+
+    st.divider()
+
+    # Buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True, key="withdraw_cancel"):
+            st.rerun()
+    with col2:
+        if st.button("支出", type="primary", use_container_width=True, key="withdraw_submit"):
+            # Validation
+            if not selected_cat_id:
+                st.error("請選擇科目")
+                return
+
+            amount = parse_amount(amount_str)
+            if amount <= 0:
+                st.error("請輸入有效金額")
+                return
+
+            if not item.strip():
+                st.error("請輸入品項")
+                return
+
+            # Write transaction
+            success = add_transaction(
+                trans_type=TYPE_SAVING_OUT,
+                amount=amount,
+                account=ACCOUNT_SAVING,
+                category_id=selected_cat_id,
+                goal_id=goal_id,
+                item=item.strip(),
+                note=note.strip() if note else "",
+                bank_id=selected_bank_id,
+                payment_method=selected_payment_value
+            )
+
+            if success:
+                st.session_state["show_toast"] = f"✅ 已支出 ${amount:,.0f}"
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error("支出失敗，請稍後再試")
+
+
 def render_goal_card(row):
     """Render a goal card (Has_Target = TRUE)"""
     goal_id = row["Goal_ID"]
     name = row["Name"]
     balance = get_saving_balance(goal_id)
     target = float(row["Target_Amount"]) if row["Target_Amount"] else 0
+
+    # Get defaults for withdraw dialog
+    default_bank = row.get("Default_Bank_ID", "") or ""
+    default_payment = row.get("Default_Payment_Method", "") or ""
 
     with st.container(border=True):
         st.markdown(f"**🎯 {name}**")
@@ -2278,7 +2384,7 @@ def render_goal_card(row):
                 dialog_saving_deposit(goal_id, name)
         with col2:
             if st.button("支出", key=f"withdraw_{goal_id}", use_container_width=True):
-                st.info("功能開發中")
+                dialog_saving_withdraw(goal_id, name, default_bank, default_payment)
         with col3:
             if st.button("完成目標", key=f"complete_{goal_id}", use_container_width=True):
                 st.info("功能開發中")
@@ -2289,6 +2395,10 @@ def render_pool_card(row):
     goal_id = row["Goal_ID"]
     name = row["Name"]
     balance = get_saving_balance(goal_id)
+
+    # Get defaults for withdraw dialog
+    default_bank = row.get("Default_Bank_ID", "") or ""
+    default_payment = row.get("Default_Payment_Method", "") or ""
 
     with st.container(border=True):
         st.markdown(f"**📈 {name}**")
@@ -2301,7 +2411,7 @@ def render_pool_card(row):
                 dialog_saving_deposit(goal_id, name)
         with col2:
             if st.button("支出", key=f"withdraw_{goal_id}", use_container_width=True):
-                st.info("功能開發中")
+                dialog_saving_withdraw(goal_id, name, default_bank, default_payment)
 
 
 def tab_goals():
