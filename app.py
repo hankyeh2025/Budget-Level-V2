@@ -708,6 +708,41 @@ def add_saving_goal(name: str, has_target: bool, target_amount: float = 0,
         return False
 
 
+def update_config(key: str, value) -> bool:
+    """
+    Update a Config entry
+
+    Args:
+        key: Config key to update
+        value: New value
+
+    Returns:
+        bool: True if successful
+    """
+    spreadsheet = get_spreadsheet()
+    if spreadsheet is None:
+        return False
+
+    try:
+        ws = spreadsheet.worksheet(SHEET_CONFIG)
+        records = ws.get_all_records()
+
+        for idx, record in enumerate(records):
+            if record.get("Key") == key:
+                row_num = idx + 2  # +1 for header, +1 for 1-indexed
+                ws.update_cell(row_num, 2, value)  # Column B = Value
+                st.cache_data.clear()
+                return True
+
+        # Key not found
+        st.error(f"找不到設定項目：{key}")
+        return False
+
+    except Exception as e:
+        st.error(f"更新設定失敗: {e}")
+        return False
+
+
 # =============================================================================
 # 工具函式
 # =============================================================================
@@ -1909,6 +1944,156 @@ def dialog_adjustment():
                         st.rerun()
 
 
+@st.dialog("轉帳")
+def dialog_transfer():
+    """帳戶間轉帳 Dialog"""
+    # 載入儲蓄目標
+    saving_goals = load_saving_goals()
+    active_goals = pd.DataFrame()
+    if not saving_goals.empty and "Status" in saving_goals.columns:
+        active_goals = saving_goals[saving_goals["Status"] == "Active"]
+
+    # 建立來源選項
+    source_options = ["Free Fund", "Back Up"]
+    source_account_map = {
+        "Free Fund": {"account": ACCOUNT_FREEFUND, "goal_id": ""},
+        "Back Up": {"account": ACCOUNT_BACKUP, "goal_id": ""}
+    }
+
+    # 加入 Saving 目標作為來源
+    if not active_goals.empty:
+        for _, goal in active_goals.iterrows():
+            goal_name = f"Saving: {goal['Name']}"
+            source_options.insert(-1, goal_name)  # 插入在 Back Up 之前
+            source_account_map[goal_name] = {
+                "account": ACCOUNT_SAVING,
+                "goal_id": goal["Goal_ID"]
+            }
+
+    # 建立目標選項
+    target_options = ["Wallet", "Free Fund", "Back Up"]
+    target_account_map = {
+        "Wallet": {"account": "Wallet", "goal_id": ""},
+        "Free Fund": {"account": ACCOUNT_FREEFUND, "goal_id": ""},
+        "Back Up": {"account": ACCOUNT_BACKUP, "goal_id": ""}
+    }
+
+    # 加入 Saving 目標作為目標
+    if not active_goals.empty:
+        for _, goal in active_goals.iterrows():
+            goal_name = f"Saving: {goal['Name']}"
+            target_options.insert(-1, goal_name)  # 插入在 Back Up 之前
+            target_account_map[goal_name] = {
+                "account": ACCOUNT_SAVING,
+                "goal_id": goal["Goal_ID"]
+            }
+
+    # 來源選擇
+    selected_source = st.selectbox("轉出帳戶 *", source_options)
+    source_info = source_account_map.get(selected_source, {})
+
+    # 顯示來源餘額
+    if selected_source == "Free Fund":
+        source_balance = get_free_fund_balance()
+        st.caption(f"可用餘額：${source_balance:,.0f}")
+    elif selected_source == "Back Up":
+        source_balance = get_backup_balance()
+        st.caption(f"可用餘額：${source_balance:,.0f}")
+        st.warning("⚠️ 將動用緊急儲備")
+    elif selected_source.startswith("Saving:"):
+        goal_id = source_info.get("goal_id", "")
+        source_balance = get_saving_balance(goal_id)
+        st.caption(f"目前累積：${source_balance:,.0f}")
+        st.warning("⚠️ 將影響儲蓄目標進度")
+    else:
+        source_balance = 0
+
+    # 目標選擇
+    selected_target = st.selectbox("轉入帳戶 *", target_options)
+    target_info = target_account_map.get(selected_target, {})
+
+    # 金額輸入
+    amount_text = st.text_input("金額 *", placeholder="輸入金額")
+
+    # 備註
+    note = st.text_input("備註（選填）")
+
+    st.divider()
+
+    # 按鈕
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True, key="transfer_cancel"):
+            st.rerun()
+    with col2:
+        if st.button("確認轉帳", type="primary", use_container_width=True, key="transfer_confirm"):
+            amount = parse_amount(amount_text)
+
+            # 驗證
+            if amount <= 0:
+                st.error("請輸入有效金額")
+            elif selected_source == selected_target:
+                st.error("轉出與轉入帳戶不可相同")
+            elif amount > source_balance:
+                st.error(f"餘額不足（可用：${source_balance:,.0f}）")
+            else:
+                # 執行轉帳
+                source_account = source_info.get("account", "")
+                source_goal_id = source_info.get("goal_id", "")
+                target_account = target_info.get("account", "")
+                target_goal_id = target_info.get("goal_id", "")
+
+                if target_account == "Wallet":
+                    # 轉入錢包：寫 Transaction + Wallet_Log
+                    # 決定來源顯示名稱
+                    if source_account == ACCOUNT_FREEFUND:
+                        source_name = "Free Fund"
+                    elif source_account == ACCOUNT_BACKUP:
+                        source_name = "Back Up"
+                    elif source_account == ACCOUNT_SAVING:
+                        # 找目標名稱
+                        goal_row = active_goals[active_goals["Goal_ID"] == source_goal_id]
+                        source_name = f"Saving ({goal_row.iloc[0]['Name']})" if not goal_row.empty else "Saving"
+                    else:
+                        source_name = source_account
+
+                    # 寫 Transaction
+                    add_transaction(
+                        trans_type=TYPE_TRANSFER,
+                        amount=amount,
+                        account=source_account,
+                        target_account="Wallet",
+                        goal_id=source_goal_id,
+                        note=note or f"轉帳至錢包"
+                    )
+
+                    # 寫 Wallet_Log
+                    add_wallet_log(
+                        WALLET_TRANSFER_IN,
+                        amount,
+                        note=f"從 {source_name} 轉入"
+                    )
+
+                    st.session_state["show_toast"] = f"已從 {selected_source} 轉入錢包 ${amount:,.0f}"
+                    st.rerun()
+                else:
+                    # 帳戶間轉帳：只寫 Transaction
+                    # 決定要用哪個 goal_id
+                    goal_id = source_goal_id or target_goal_id
+
+                    add_transaction(
+                        trans_type=TYPE_TRANSFER,
+                        amount=amount,
+                        account=source_account,
+                        target_account=target_account,
+                        goal_id=goal_id,
+                        note=note or f"轉帳"
+                    )
+
+                    st.session_state["show_toast"] = f"已從 {selected_source} 轉帳 ${amount:,.0f} 至 {selected_target}"
+                    st.rerun()
+
+
 @st.dialog("編輯銀行帳戶")
 def dialog_edit_bank_account(bank_id: str, current_name: str, current_note: str, current_status: str):
     """編輯銀行帳戶 Dialog"""
@@ -2949,11 +3134,14 @@ def tab_strategy():
         wallet_balance = get_wallet_balance()
         st.markdown(f"**目前餘額：** ${wallet_balance:,.0f}")
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("+ 收入入帳", use_container_width=True):
                 dialog_income()
         with col2:
+            if st.button("↔ 轉帳", use_container_width=True):
+                dialog_transfer()
+        with col3:
             if st.button("校正錢包", use_container_width=True):
                 dialog_adjustment()
 
@@ -3073,14 +3261,53 @@ def tab_strategy():
 
     st.divider()
 
-    # 設定總覽
-    st.markdown("### 系統設定")
-    config = load_config()
-    if config:
-        for key, value in config.items():
-            st.markdown(f"- **{key}**: {value}")
-    else:
-        st.info("尚無設定資料")
+    # 系統設定（可編輯）
+    with st.expander("⚙️ 系統設定"):
+        config = load_config()
+        if config:
+            # 顯示目前設定
+            st.markdown("**目前設定：**")
+            for key, value in config.items():
+                st.markdown(f"- {key}: {value}")
+
+            st.divider()
+
+            # 編輯 Back_Up_Limit
+            st.markdown("**編輯設定：**")
+            with st.form(key="edit_config_form"):
+                current_backup_limit = float(config.get("Back_Up_Limit", 0) or 0)
+                new_backup_limit = st.number_input(
+                    "Back_Up_Limit（Back Up 警戒值）",
+                    min_value=0,
+                    value=int(current_backup_limit),
+                    step=1000,
+                    help="Back Up 餘額低於此值時會顯示警告"
+                )
+
+                submitted = st.form_submit_button("儲存設定")
+                if submitted:
+                    if update_config("Back_Up_Limit", new_backup_limit):
+                        st.session_state["show_toast"] = "設定已更新"
+                        st.rerun()
+        else:
+            st.info("尚無設定資料")
+
+    # CSV 匯出
+    with st.expander("📤 資料匯出"):
+        transactions = load_transactions()
+        if not transactions.empty:
+            csv = transactions.to_csv(index=False)
+            filename = f"budget_level_v2.1_export_{get_taiwan_today().strftime('%Y%m%d')}.csv"
+            st.download_button(
+                label="📥 下載交易記錄 CSV",
+                data=csv,
+                file_name=filename,
+                mime="text/csv",
+                use_container_width=True
+            )
+            st.caption(f"共 {len(transactions)} 筆交易記錄")
+        else:
+            st.info("尚無交易記錄")
 
 
 # =============================================================================
