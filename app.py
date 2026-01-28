@@ -609,6 +609,51 @@ def update_sub_tag(sub_tag_id: str, updates: dict) -> bool:
         return False
 
 
+def update_saving_goal_status(goal_id: str, status: str) -> bool:
+    """
+    Update Saving_Goal status to Completed
+
+    Args:
+        goal_id: Goal ID to update
+        status: New status (e.g., "Completed")
+
+    Returns:
+        bool: True if successful
+    """
+    try:
+        spreadsheet = get_spreadsheet()
+        if spreadsheet is None:
+            return False
+
+        ws = spreadsheet.worksheet(SHEET_SAVING_GOAL)
+        records = ws.get_all_records()
+
+        for idx, record in enumerate(records):
+            if record.get("Goal_ID") == goal_id:
+                row_num = idx + 2  # +1 for header, +1 for 1-indexed
+
+                # Find Status and Completed_At columns
+                headers = ws.row_values(1)
+                status_col = headers.index("Status") + 1
+
+                ws.update_cell(row_num, status_col, status)
+
+                # Update Completed_At if column exists
+                if "Completed_At" in headers:
+                    completed_col = headers.index("Completed_At") + 1
+                    ws.update_cell(row_num, completed_col, get_taiwan_now().strftime("%Y-%m-%d %H:%M:%S"))
+
+                st.cache_data.clear()
+                return True
+
+        st.error(f"找不到目標：{goal_id}")
+        return False
+
+    except Exception as e:
+        st.error(f"更新目標狀態失敗: {e}")
+        return False
+
+
 # =============================================================================
 # 工具函式
 # =============================================================================
@@ -2355,6 +2400,95 @@ def dialog_saving_withdraw(goal_id: str, goal_name: str, default_bank_id: str = 
                 st.error("支出失敗，請稍後再試")
 
 
+@st.dialog("完成目標")
+def dialog_complete_goal(goal_id: str, goal_name: str, target_amount: float):
+    """Dialog for completing a Saving goal"""
+    st.write(f"**目標：{goal_name}**")
+
+    current_balance = get_saving_balance(goal_id)
+    st.markdown(f"累積金額：**${current_balance:,.0f}**")
+
+    if target_amount > 0:
+        st.caption(f"目標金額：${target_amount:,.0f}")
+
+    st.divider()
+
+    # Actual expense input (default = current balance)
+    amount_str = st.text_input(
+        "實際支出金額 *",
+        value=f"{int(current_balance)}",
+        key="complete_amount"
+    )
+
+    # Calculate and show difference
+    amount = parse_amount(amount_str)
+    difference = current_balance - amount
+
+    if difference > 0:
+        st.success(f"💡 差額 ${difference:,.0f} 將進入自由支配金")
+    elif difference < 0:
+        st.warning(f"⚠️ 實際支出超過累積金額 ${abs(difference):,.0f}")
+    else:
+        st.info("實際支出 = 累積金額，無差額")
+
+    # Note
+    note = st.text_input("備註", placeholder="選填", key="complete_note")
+
+    st.divider()
+
+    # Buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True, key="complete_cancel"):
+            st.rerun()
+    with col2:
+        if st.button("確認完成", type="primary", use_container_width=True, key="complete_submit"):
+            # Validation
+            if amount <= 0:
+                st.error("請輸入有效金額")
+                return
+
+            if amount > current_balance:
+                st.error("實際支出不可超過累積金額")
+                return
+
+            success = True
+
+            # Step 1: If difference > 0, add Settlement_In (difference → Free Fund)
+            if difference > 0:
+                success = add_transaction(
+                    trans_type=TYPE_SETTLEMENT_IN,
+                    amount=difference,
+                    account=ACCOUNT_FREEFUND,
+                    goal_id=goal_id,
+                    note=f"目標完成差額：{goal_name}",
+                    ref=f"Goal_Complete_{goal_id}"
+                )
+
+            # Step 2: Add Saving_Out for actual expense
+            if success:
+                success = add_transaction(
+                    trans_type=TYPE_SAVING_OUT,
+                    amount=amount,
+                    account=ACCOUNT_SAVING,
+                    goal_id=goal_id,
+                    item=f"目標完成：{goal_name}",
+                    note=note.strip() if note else "",
+                    ref=f"Goal_Complete_{goal_id}"
+                )
+
+            # Step 3: Update goal status
+            if success:
+                success = update_saving_goal_status(goal_id, "Completed")
+
+            if success:
+                st.session_state["show_toast"] = f"✅ 目標「{goal_name}」已完成！"
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error("操作失敗，請稍後再試")
+
+
 def render_goal_card(row):
     """Render a goal card (Has_Target = TRUE)"""
     goal_id = row["Goal_ID"]
@@ -2387,7 +2521,7 @@ def render_goal_card(row):
                 dialog_saving_withdraw(goal_id, name, default_bank, default_payment)
         with col3:
             if st.button("完成目標", key=f"complete_{goal_id}", use_container_width=True):
-                st.info("功能開發中")
+                dialog_complete_goal(goal_id, name, target)
 
 
 def render_pool_card(row):
