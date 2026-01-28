@@ -2206,6 +2206,53 @@ def tab_expense():
 # UI 元件 - Tab 2: 目標
 # =============================================================================
 
+@st.dialog("存入")
+def dialog_saving_deposit(goal_id: str, goal_name: str):
+    """Dialog for depositing money into a Saving goal/pool"""
+    st.write(f"**目標：{goal_name}**")
+
+    # Show current balance for reference
+    current_balance = get_saving_balance(goal_id)
+    st.caption(f"目前餘額：${current_balance:,.0f}")
+
+    # Amount input
+    amount_str = st.text_input("金額 *", placeholder="例：5000", key="deposit_amount")
+
+    # Note input
+    note = st.text_input("備註", placeholder="選填", key="deposit_note")
+
+    st.divider()
+
+    # Buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("取消", use_container_width=True):
+            st.rerun()
+    with col2:
+        if st.button("存入", type="primary", use_container_width=True):
+            # Validation
+            amount = parse_amount(amount_str)
+            if amount <= 0:
+                st.error("請輸入有效金額")
+                return
+
+            # Write transaction
+            success = add_transaction(
+                trans_type=TYPE_SAVING_IN,
+                amount=amount,
+                account=ACCOUNT_SAVING,
+                goal_id=goal_id,
+                note=note.strip() if note.strip() else "存入"
+            )
+
+            if success:
+                st.session_state["show_toast"] = f"✅ 已存入 ${amount:,.0f}"
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error("存入失敗，請稍後再試")
+
+
 def render_goal_card(row):
     """Render a goal card (Has_Target = TRUE)"""
     goal_id = row["Goal_ID"]
@@ -2224,11 +2271,11 @@ def render_goal_card(row):
             st.markdown(f"${balance:,.0f} / $0 (目標未設定)")
             st.progress(0.0)
 
-        # Placeholder buttons
+        # Action buttons
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("存入", key=f"deposit_{goal_id}", use_container_width=True):
-                st.info("功能開發中")
+                dialog_saving_deposit(goal_id, name)
         with col2:
             if st.button("支出", key=f"withdraw_{goal_id}", use_container_width=True):
                 st.info("功能開發中")
@@ -2247,11 +2294,11 @@ def render_pool_card(row):
         st.markdown(f"**📈 {name}**")
         st.markdown(f"餘額：**${balance:,.0f}**")
 
-        # Placeholder buttons (no "完成目標")
+        # Action buttons (no "完成目標")
         col1, col2 = st.columns(2)
         with col1:
             if st.button("存入", key=f"deposit_{goal_id}", use_container_width=True):
-                st.info("功能開發中")
+                dialog_saving_deposit(goal_id, name)
         with col2:
             if st.button("支出", key=f"withdraw_{goal_id}", use_container_width=True):
                 st.info("功能開發中")
