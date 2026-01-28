@@ -676,6 +676,23 @@ def parse_amount(value: str) -> float:
         return 0.0
 
 
+def is_has_target(value) -> bool:
+    """
+    Handle Has_Target field from Google Sheets (may be string or bool)
+
+    Args:
+        value: Has_Target field value (bool, str, or other)
+
+    Returns:
+        bool: True if value indicates "has target"
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.upper() == "TRUE"
+    return bool(value)
+
+
 # =============================================================================
 # Period 狀態函式
 # =============================================================================
@@ -795,6 +812,39 @@ def get_category_spent(category_id: str, period_id: str) -> float:
         (transactions["Period_ID"] == period_id)
     ]
     return float(expenses["Amount"].sum()) if not expenses.empty else 0.0
+
+
+# =============================================================================
+# Saving 計算函式
+# =============================================================================
+
+def get_saving_balance(goal_id: str) -> float:
+    """
+    Calculate Saving goal/pool balance.
+
+    Formula: Σ Saving_In - Σ Saving_Out (where Goal_ID matches)
+
+    Args:
+        goal_id: The Goal_ID to calculate balance for
+
+    Returns:
+        float: Current balance of the saving goal/pool
+    """
+    transactions = load_transactions()
+    if transactions.empty:
+        return 0.0
+
+    saving_in = transactions[
+        (transactions["Type"] == TYPE_SAVING_IN) &
+        (transactions["Goal_ID"] == goal_id)
+    ]["Amount"].sum()
+
+    saving_out = transactions[
+        (transactions["Type"] == TYPE_SAVING_OUT) &
+        (transactions["Goal_ID"] == goal_id)
+    ]["Amount"].sum()
+
+    return float(saving_in - saving_out)
 
 
 # =============================================================================
@@ -2156,32 +2206,115 @@ def tab_expense():
 # UI 元件 - Tab 2: 目標
 # =============================================================================
 
-def tab_goals():
-    """Tab 2: 目標 (Placeholder)"""
-    st.header("目標")
+def render_goal_card(row):
+    """Render a goal card (Has_Target = TRUE)"""
+    goal_id = row["Goal_ID"]
+    name = row["Name"]
+    balance = get_saving_balance(goal_id)
+    target = float(row["Target_Amount"]) if row["Target_Amount"] else 0
 
-    # 儲蓄目標
-    st.markdown("### 進行中的儲蓄目標")
+    with st.container(border=True):
+        st.markdown(f"**🎯 {name}**")
+
+        if target > 0:
+            percentage = int(balance / target * 100)
+            st.markdown(f"${balance:,.0f} / ${target:,.0f} ({percentage}%)")
+            st.progress(min(balance / target, 1.0))
+        else:
+            st.markdown(f"${balance:,.0f} / $0 (目標未設定)")
+            st.progress(0.0)
+
+        # Placeholder buttons
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("存入", key=f"deposit_{goal_id}", use_container_width=True):
+                st.info("功能開發中")
+        with col2:
+            if st.button("支出", key=f"withdraw_{goal_id}", use_container_width=True):
+                st.info("功能開發中")
+        with col3:
+            if st.button("完成目標", key=f"complete_{goal_id}", use_container_width=True):
+                st.info("功能開發中")
+
+
+def render_pool_card(row):
+    """Render a pool card (Has_Target = FALSE)"""
+    goal_id = row["Goal_ID"]
+    name = row["Name"]
+    balance = get_saving_balance(goal_id)
+
+    with st.container(border=True):
+        st.markdown(f"**📈 {name}**")
+        st.markdown(f"餘額：**${balance:,.0f}**")
+
+        # Placeholder buttons (no "完成目標")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("存入", key=f"deposit_{goal_id}", use_container_width=True):
+                st.info("功能開發中")
+        with col2:
+            if st.button("支出", key=f"withdraw_{goal_id}", use_container_width=True):
+                st.info("功能開發中")
+
+
+def tab_goals():
+    """Tab 2: 目標"""
+    st.header("🎯 目標")
+
     goals = load_saving_goals()
 
+    # Empty state
     if goals.empty:
-        st.info("尚無儲蓄目標")
-    else:
-        active_goals = goals[goals["Status"] == "Active"]
-        if active_goals.empty:
-            st.info("目前沒有進行中的目標")
-        else:
-            for _, goal in active_goals.iterrows():
-                with st.container(border=True):
-                    st.markdown(f"**{goal['Name']}**")
-                    target = float(goal.get("Target_Amount", 0))
-                    accumulated = float(goal.get("Accumulated", 0))
-                    progress = min(accumulated / target, 1.0) if target > 0 else 0
-                    st.progress(progress)
-                    st.caption(f"${accumulated:,.0f} / ${target:,.0f}")
+        st.info("尚未建立任何目標")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("+ 新增目標", use_container_width=True):
+                st.info("功能開發中")
+        with col2:
+            if st.button("+ 新增資金池", use_container_width=True):
+                st.info("功能開發中")
+        return
 
-    st.divider()
-    st.caption("功能建置中...")
+    # Split by Status and Has_Target
+    active_goals = goals[goals["Status"] == "Active"]
+    completed_goals = goals[goals["Status"] == "Completed"]
+
+    has_target_goals = active_goals[active_goals["Has_Target"].apply(is_has_target)]
+    pool_goals = active_goals[~active_goals["Has_Target"].apply(is_has_target)]
+
+    # Section: Has Target
+    st.subheader("── 有目標 ──")
+    if has_target_goals.empty:
+        st.caption("尚無進行中的目標")
+    else:
+        for _, row in has_target_goals.iterrows():
+            render_goal_card(row)
+
+    # Section: Pools
+    st.subheader("── 資金池（無目標）──")
+    if pool_goals.empty:
+        st.caption("尚無資金池")
+    else:
+        for _, row in pool_goals.iterrows():
+            render_pool_card(row)
+
+    # Add buttons (placeholder)
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("+ 新增目標", use_container_width=True, key="add_goal_main"):
+            st.info("功能開發中")
+    with col2:
+        if st.button("+ 新增資金池", use_container_width=True, key="add_pool_main"):
+            st.info("功能開發中")
+
+    # Section: Completed
+    if not completed_goals.empty:
+        with st.expander("── 已完成 ──"):
+            for _, row in completed_goals.iterrows():
+                completed_at = row.get("Completed_At", "") or ""
+                target = float(row["Target_Amount"]) if row["Target_Amount"] else 0
+                date_str = completed_at[:10] if len(str(completed_at)) >= 10 else ""
+                st.caption(f"✓ {row['Name']}　${target:,.0f}　{date_str}")
 
 
 # =============================================================================
