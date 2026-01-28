@@ -2414,9 +2414,10 @@ def dialog_complete_goal(goal_id: str, goal_name: str, target_amount: float):
     st.divider()
 
     # Actual expense input (default = current balance)
+    default_amount = f"{current_balance:,.0f}".replace(",", "") if current_balance > 0 else ""
     amount_str = st.text_input(
         "實際支出金額 *",
-        value=f"{int(current_balance)}",
+        value=default_amount,
         key="complete_amount"
     )
 
@@ -2601,11 +2602,51 @@ def tab_goals():
     # Section: Completed
     if not completed_goals.empty:
         with st.expander("── 已完成 ──"):
+            transactions = load_transactions()
             for _, row in completed_goals.iterrows():
-                completed_at = row.get("Completed_At", "") or ""
+                goal_id = row["Goal_ID"]
+                name = row["Name"]
                 target = float(row["Target_Amount"]) if row["Target_Amount"] else 0
-                date_str = completed_at[:10] if len(str(completed_at)) >= 10 else ""
-                st.caption(f"✓ {row['Name']}　${target:,.0f}　{date_str}")
+
+                # Calculate actual expense from transactions
+                actual_expense = 0
+                if not transactions.empty:
+                    # Look for Goal_Complete transactions first
+                    completed_txns = transactions[
+                        (transactions["Goal_ID"] == goal_id) &
+                        (transactions["Type"] == TYPE_SAVING_OUT) &
+                        (transactions["Ref"].str.contains("Goal_Complete", na=False))
+                    ]
+                    if not completed_txns.empty:
+                        actual_expense = float(completed_txns["Amount"].sum())
+                    else:
+                        # Fallback: use total Saving_Out
+                        saving_out = transactions[
+                            (transactions["Goal_ID"] == goal_id) &
+                            (transactions["Type"] == TYPE_SAVING_OUT)
+                        ]
+                        if not saving_out.empty:
+                            actual_expense = float(saving_out["Amount"].sum())
+
+                # Format completed date
+                completed_at = row.get("Completed_At", "") or ""
+                date_str = ""
+                if completed_at:
+                    try:
+                        date_str = pd.to_datetime(completed_at).strftime("%Y/%m")
+                    except Exception:
+                        date_str = str(completed_at)[:7]
+
+                # Display: target and actual expense
+                display_text = f"✓ {name}"
+                if target > 0:
+                    display_text += f"　目標 ${target:,.0f} / 實際 ${actual_expense:,.0f}"
+                else:
+                    display_text += f"　實際 ${actual_expense:,.0f}"
+                if date_str:
+                    display_text += f"　{date_str}"
+
+                st.caption(display_text)
 
 
 # =============================================================================
