@@ -946,6 +946,38 @@ def get_saving_balance(goal_id: str) -> float:
     return float(saving_in - saving_out)
 
 
+def get_saving_transactions(goal_id: str):
+    """
+    Get all transactions for a Saving goal/pool.
+
+    Filters transactions where Goal_ID matches and Type is Saving_In or Saving_Out.
+    Returns sorted by Date descending (newest first).
+
+    Args:
+        goal_id: The Goal_ID to filter transactions for
+
+    Returns:
+        DataFrame: Filtered and sorted transactions
+    """
+    transactions = load_transactions()
+    if transactions.empty:
+        return transactions
+
+    # Filter by Goal_ID and Saving types
+    filtered = transactions[
+        (transactions["Goal_ID"] == goal_id) &
+        (transactions["Type"].isin([TYPE_SAVING_IN, TYPE_SAVING_OUT]))
+    ].copy()
+
+    if filtered.empty:
+        return filtered
+
+    # Sort by Date descending (newest first)
+    filtered = filtered.sort_values("Date", ascending=False)
+
+    return filtered
+
+
 # =============================================================================
 # 帳戶餘額計算函式
 # =============================================================================
@@ -2689,6 +2721,46 @@ def dialog_add_pool():
                 st.error("建立失敗，請稍後再試")
 
 
+def render_saving_transactions(goal_id: str):
+    """
+    Render transaction list for a Saving goal/pool.
+
+    Display format:
+    - Saving_In: +$X (date) note
+    - Saving_Out: -$X (date) category/item note
+    """
+    txns = get_saving_transactions(goal_id)
+
+    if txns.empty:
+        st.caption("尚無交易紀錄")
+        return
+
+    for _, txn in txns.iterrows():
+        date_str = str(txn["Date"])[:10] if txn["Date"] else ""
+        amount = float(txn["Amount"]) if txn["Amount"] else 0
+        note = txn.get("Note", "") or ""
+        txn_type = txn["Type"]
+
+        if txn_type == TYPE_SAVING_IN:
+            # Deposit: +$X (date) note
+            line = f"➕ ${amount:,.0f}　{date_str}"
+            if note:
+                line += f"　{note}"
+            st.caption(line)
+        elif txn_type == TYPE_SAVING_OUT:
+            # Withdraw: -$X (date) category/item note
+            category = txn.get("Category_ID", "") or ""
+            item = txn.get("Item", "") or ""
+            line = f"➖ ${amount:,.0f}　{date_str}"
+            if category or item:
+                line += f"　{category}"
+                if item:
+                    line += f"/{item}"
+            if note:
+                line += f"　{note}"
+            st.caption(line)
+
+
 def render_goal_card(row):
     """Render a goal card (Has_Target = TRUE)"""
     goal_id = row["Goal_ID"]
@@ -2723,6 +2795,10 @@ def render_goal_card(row):
             if st.button("完成目標", key=f"complete_{goal_id}", use_container_width=True):
                 dialog_complete_goal(goal_id, name, target)
 
+        # Transaction details
+        with st.expander("📋 明細"):
+            render_saving_transactions(goal_id)
+
 
 def render_pool_card(row):
     """Render a pool card (Has_Target = FALSE)"""
@@ -2746,6 +2822,10 @@ def render_pool_card(row):
         with col2:
             if st.button("支出", key=f"withdraw_{goal_id}", use_container_width=True):
                 dialog_saving_withdraw(goal_id, name, default_bank, default_payment)
+
+        # Transaction details
+        with st.expander("📋 明細"):
+            render_saving_transactions(goal_id)
 
 
 def tab_goals():
