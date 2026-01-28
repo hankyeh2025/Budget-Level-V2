@@ -1869,7 +1869,7 @@ def quick_expense_dialog(category_id: str, category_name: str):
 
             # Check active period
             period = get_active_period()
-            if not period:
+            if period is None:
                 st.error("請先啟動週期儀式")
                 return
 
