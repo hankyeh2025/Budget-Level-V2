@@ -951,7 +951,7 @@ def get_saving_transactions(goal_id: str):
     Get all transactions for a Saving goal/pool.
 
     Filters transactions where Goal_ID matches and Type is Saving_In or Saving_Out.
-    Returns sorted by Date descending (newest first).
+    Returns sorted by Timestamp descending (newest first).
 
     Args:
         goal_id: The Goal_ID to filter transactions for
@@ -972,8 +972,8 @@ def get_saving_transactions(goal_id: str):
     if filtered.empty:
         return filtered
 
-    # Sort by Date descending (newest first)
-    filtered = filtered.sort_values("Date", ascending=False)
+    # Sort by Timestamp descending (newest first)
+    filtered = filtered.sort_values("Timestamp", ascending=False)
 
     return filtered
 
