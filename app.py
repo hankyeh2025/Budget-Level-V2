@@ -1759,6 +1759,7 @@ def render_ritual_step4():
     st.session_state.ritual_data["saving_allocations"] = saving_allocations
     st.session_state.ritual_data["backup_allocation"] = backup_alloc
     st.session_state.ritual_data["total_allocation"] = total_allocation
+    st.session_state.ritual_data["wallet_remaining"] = wallet_remaining
 
     st.divider()
 
@@ -1843,12 +1844,31 @@ def complete_ritual():
                 period_id=period_id
             )
 
-        # 5. 更新科目預算（如果有變更）
+        # 5. 處理未分配餘額 - 轉入 Free Fund
+        wallet_remaining = data.get("wallet_remaining", 0)
+        if wallet_remaining > 0:
+            # 寫入 Wallet_Log - 未分配餘額轉出
+            add_wallet_log(
+                WALLET_ALLOCATE_OUT,
+                wallet_remaining,
+                note="未分配餘額轉入 Free Fund",
+                ref=period_id
+            )
+            # 寫入 Settlement_In 交易
+            add_transaction(
+                trans_type=TYPE_SETTLEMENT_IN,
+                amount=wallet_remaining,
+                account=ACCOUNT_FREEFUND,
+                note="週期儀式未分配餘額",
+                period_id=period_id
+            )
+
+        # 6. 更新科目預算（如果有變更）
         category_budgets = data.get("category_budgets", {})
         for cat_id, budget in category_budgets.items():
             update_category(cat_id, {"Budget": budget})
 
-        # 6. 清理並結束儀式
+        # 7. 清理並結束儀式
         st.cache_data.clear()
         st.session_state["show_toast"] = "✨ 週期儀式完成！新週期已開始"
         end_ritual()
