@@ -3337,7 +3337,7 @@ def tab_strategy():
     with st.expander("📤 資料匯出"):
         transactions = load_transactions()
         if not transactions.empty:
-            csv = transactions.to_csv(index=False)
+            csv = transactions.to_csv(index=False).encode('utf-8-sig')
             filename = f"budget_level_v2.1_export_{get_taiwan_today().strftime('%Y%m%d')}.csv"
             st.download_button(
                 label="📥 下載交易記錄 CSV",
