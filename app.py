@@ -36,6 +36,7 @@ ACCOUNT_LIVING = "Living"
 ACCOUNT_SAVING = "Saving"
 ACCOUNT_BACKUP = "Back_Up"
 ACCOUNT_FREEFUND = "Free_Fund"
+ACCOUNT_WALLET = "Wallet"
 
 # Wallet Log Types (v2.1 新增)
 WALLET_INCOME = "Income"
@@ -1657,7 +1658,7 @@ def render_ritual_step4():
                     trans_type=TYPE_TRANSFER,
                     amount=transfer_amount,
                     account=source_account,
-                    target_account="Wallet",
+                    target_account=ACCOUNT_WALLET,
                     note="週期儀式轉帳"
                 )
                 # 寫入 Wallet_Log
@@ -1834,7 +1835,7 @@ def complete_ritual():
             add_transaction(
                 trans_type=TYPE_TRANSFER,
                 amount=backup_alloc,
-                account="Wallet",
+                account=ACCOUNT_WALLET,
                 target_account=ACCOUNT_BACKUP,
                 note="週期儀式 Back Up 補血",
                 period_id=period_id
@@ -2011,7 +2012,7 @@ def dialog_transfer():
     # 建立目標選項
     target_options = ["Wallet", "Free Fund", "Back Up"]
     target_account_map = {
-        "Wallet": {"account": "Wallet", "goal_id": ""},
+        "Wallet": {"account": ACCOUNT_WALLET, "goal_id": ""},
         "Free Fund": {"account": ACCOUNT_FREEFUND, "goal_id": ""},
         "Back Up": {"account": ACCOUNT_BACKUP, "goal_id": ""}
     }
@@ -2081,7 +2082,7 @@ def dialog_transfer():
                 target_account = target_info.get("account", "")
                 target_goal_id = target_info.get("goal_id", "")
 
-                if target_account == "Wallet":
+                if target_account == ACCOUNT_WALLET:
                     # 轉入錢包：寫 Transaction + Wallet_Log
                     # 決定來源顯示名稱
                     if source_account == ACCOUNT_FREEFUND:
@@ -2100,7 +2101,7 @@ def dialog_transfer():
                         trans_type=TYPE_TRANSFER,
                         amount=amount,
                         account=source_account,
-                        target_account="Wallet",
+                        target_account=ACCOUNT_WALLET,
                         goal_id=source_goal_id,
                         note=note or f"轉帳至錢包"
                     )
@@ -2987,7 +2988,7 @@ def render_saving_transactions(goal_id: str):
 
             if account == ACCOUNT_SAVING:
                 # 轉出
-                target_display = target_account if target_account != "Wallet" else "錢包"
+                target_display = target_account if target_account != ACCOUNT_WALLET else "錢包"
                 line = f"↗️ ${amount:,.0f}　{date_str}　轉出至 {target_display}"
             else:
                 # 轉入
@@ -3020,6 +3021,13 @@ def render_goal_card(row):
         else:
             st.markdown(f"${balance:,.0f} / $0 (目標未設定)")
             st.progress(0.0)
+
+        # Display deadline if exists
+        deadline = row.get("Deadline")
+        if deadline and str(deadline).strip():
+            deadline_date = ensure_date(deadline)
+            if deadline_date:
+                st.caption(f"截止 {deadline_date.strftime('%Y/%m/%d')}")
 
         # Action buttons
         col1, col2, col3 = st.columns(3)
