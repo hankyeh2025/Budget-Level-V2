@@ -3317,17 +3317,18 @@ def tab_strategy():
             st.markdown("**編輯設定：**")
             with st.form(key="edit_config_form"):
                 current_backup_limit = float(config.get("Back_Up_Limit", 0) or 0)
-                new_backup_limit = st.number_input(
+                backup_limit_input = st.text_input(
                     "Back_Up_Limit（Back Up 警戒值）",
-                    min_value=0,
-                    value=int(current_backup_limit),
-                    step=1000,
+                    value=str(int(current_backup_limit)),
                     help="Back Up 餘額低於此值時會顯示警告"
                 )
 
                 submitted = st.form_submit_button("儲存設定")
                 if submitted:
-                    if update_config("Back_Up_Limit", new_backup_limit):
+                    new_backup_limit = parse_amount(backup_limit_input)
+                    if new_backup_limit is None or new_backup_limit < 0:
+                        st.error("請輸入有效金額")
+                    elif update_config("Back_Up_Limit", new_backup_limit):
                         st.session_state["show_toast"] = "設定已更新"
                         st.rerun()
         else:
