@@ -767,14 +767,8 @@ def get_current_period_dates() -> tuple[Optional[date], Optional[date]]:
     if period is None:
         return None, None
 
-    start = period["Start_Date"]
-    end = period["End_Date"]
-
-    # 處理 datetime 或 date 類型
-    if hasattr(start, 'date'):
-        start = start.date()
-    if hasattr(end, 'date'):
-        end = end.date()
+    start = ensure_date(period["Start_Date"])
+    end = ensure_date(period["End_Date"])
 
     return start, end
 
@@ -810,6 +804,27 @@ def parse_amount(value: str) -> float:
         return 0.0
 
 
+def ensure_date(value) -> Optional[date]:
+    """
+    確保值為 date 類型
+
+    Args:
+        value: 可能是 str, datetime, pd.Timestamp, 或 date
+
+    Returns:
+        date object，若輸入為 None 則回傳 None
+    """
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return pd.to_datetime(value).date()
+    if hasattr(value, 'date'):
+        return value.date()
+    return value
+
+
 def is_has_target(value) -> bool:
     """
     Handle Has_Target field from Google Sheets (may be string or bool)
@@ -841,11 +856,7 @@ def is_period_overdue(period: pd.Series) -> bool:
     Returns:
         True if 今天已超過結束日
     """
-    end_date = period["End_Date"]
-    if isinstance(end_date, str):
-        end_date = pd.to_datetime(end_date).date()
-    elif hasattr(end_date, 'date'):
-        end_date = end_date.date()
+    end_date = ensure_date(period["End_Date"])
     return get_taiwan_today() > end_date
 
 
@@ -867,11 +878,7 @@ def get_period_days_left(period: pd.Series) -> int:
     Returns:
         剩餘天數，最小為 0
     """
-    end_date = period["End_Date"]
-    if isinstance(end_date, str):
-        end_date = pd.to_datetime(end_date).date()
-    elif hasattr(end_date, 'date'):
-        end_date = end_date.date()
+    end_date = ensure_date(period["End_Date"])
 
     today = get_taiwan_today()
     days_left = (end_date - today).days + 1
@@ -1346,19 +1353,8 @@ def render_ritual_step1():
         return
 
     period_id = period["Period_ID"]
-    start_date = period["Start_Date"]
-    end_date = period["End_Date"]
-
-    # 格式化日期
-    if isinstance(start_date, str):
-        start_date = pd.to_datetime(start_date).date()
-    elif hasattr(start_date, 'date'):
-        start_date = start_date.date()
-
-    if isinstance(end_date, str):
-        end_date = pd.to_datetime(end_date).date()
-    elif hasattr(end_date, 'date'):
-        end_date = end_date.date()
+    start_date = ensure_date(period["Start_Date"])
+    end_date = ensure_date(period["End_Date"])
 
     st.write(f"**期間：** {start_date.strftime('%m/%d')} ~ {end_date.strftime('%m/%d')}")
 
@@ -2475,11 +2471,7 @@ def tab_expense():
     with col4:
         if period is not None:
             days_left = get_period_days_left(period)
-            end_date = period["End_Date"]
-            if isinstance(end_date, str):
-                end_date = pd.to_datetime(end_date).date()
-            elif hasattr(end_date, 'date'):
-                end_date = end_date.date()
+            end_date = ensure_date(period["End_Date"])
 
             if is_period_overdue(period):
                 st.warning("⚠️ 週期已結束，待結算")
@@ -3215,19 +3207,8 @@ def tab_strategy():
 
     if period is not None:
         period_id = period["Period_ID"]
-        start_date = period["Start_Date"]
-        end_date = period["End_Date"]
-
-        # 格式化日期
-        if isinstance(start_date, str):
-            start_date = pd.to_datetime(start_date).date()
-        elif hasattr(start_date, 'date'):
-            start_date = start_date.date()
-
-        if isinstance(end_date, str):
-            end_date = pd.to_datetime(end_date).date()
-        elif hasattr(end_date, 'date'):
-            end_date = end_date.date()
+        start_date = ensure_date(period["Start_Date"])
+        end_date = ensure_date(period["End_Date"])
 
         if is_period_overdue(period):
             st.error(f"⚠️ 週期已結束，待結算")
